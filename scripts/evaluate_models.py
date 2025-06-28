@@ -10,6 +10,11 @@ from sklearn.metrics.pairwise import cosine_similarity
 import cvxpy as cp
 from scipy.optimize import nnls
 from scipy.optimize import linear_sum_assignment
+import scanpy as sc
+from sklearn.manifold import TSNE
+from sklearn.metrics import silhouette_score
+import warnings
+warnings.filterwarnings('ignore')
 
 # --- PBMC Cell Type Definitions (matching fit_hlda.py) ---
 PBMC_CELL_TYPES = [
@@ -273,8 +278,6 @@ def extract_top_genes_per_topic(beta_df: pd.DataFrame, n_top_genes: int = 10) ->
     Returns:
         DataFrame with topics as columns and top genes as rows
     """
-    print(f"[INFO] Extracting top {n_top_genes} genes per topic")
-    
     top_genes_dict = {}
     
     for topic in beta_df.columns:
@@ -296,7 +299,6 @@ def extract_top_genes_per_topic(beta_df: pd.DataFrame, n_top_genes: int = 10) ->
     # Add row labels for gene rank
     result_df.index = [f"Gene_{i+1}" for i in range(len(result_df))]
     
-    print(f"[INFO] Extracted top genes for {len(top_genes_dict)} topics")
     return result_df
 
 def reconstruction_sse(X: np.ndarray, Theta: np.ndarray, Beta) -> float:
@@ -312,11 +314,9 @@ def incremental_sse_custom(
     theta_out: Path | None = None,
 ) -> pd.DataFrame:
     """Incremental SSE with custom topic addition order: [id], [id,V1], [id,V2], [id,V1,V2]."""
-    print("[INFO] Starting incremental SSE evaluation")
     X_prop = X_df.div(X_df.sum(axis=1), axis=0).values
     
     # Estimate theta simplex once for all topics
-    print(f"[INFO] Estimating theta simplex for all topics")
     B_full = beta_df.values
     Theta_full = estimate_theta_simplex(X_prop, B_full, l1=0.002)
     
@@ -359,17 +359,13 @@ def incremental_sse_custom(
     
     # Save the full theta if requested
     if theta_out is not None:
-        print(f"[INFO] Saving theta results to {theta_out}")
         ensure_dir(theta_out.parent)
         theta_full_df.to_csv(theta_out)
         
-    print(f"[INFO] Completed SSE evaluation with {len(results)} topic combinations")
     return pd.DataFrame(results)
 
 def create_true_beta_from_counts(counts_df: pd.DataFrame, identity_topics: list[str]) -> pd.DataFrame:
 
-    print(f"[INFO] Creating true beta matrix from count data")
-    
     # Convert to proportions (like the SSE function does)
     counts_prop = counts_df.div(counts_df.sum(axis=1), axis=0)
     
@@ -381,19 +377,15 @@ def create_true_beta_from_counts(counts_df: pd.DataFrame, identity_topics: list[
         if mask.any():
             identity_avg = counts_prop[mask].mean(axis=0)
             true_beta_dict[identity] = identity_avg
-            print(f"[INFO] Identity '{identity}': {mask.sum()} cells")
         else:
             print(f"[WARNING] No cells found for identity '{identity}'")
     
     true_beta = pd.DataFrame(true_beta_dict)
-    print(f"[INFO] True beta shape: {true_beta.shape}")
     return true_beta
 
 def match_topics_to_identities(beta_est: pd.DataFrame, true_beta: pd.DataFrame, 
                               identity_topics: list[str], n_extra_topics: int) -> dict:
 
-    print(f"[INFO] Matching topics: beta_est shape {beta_est.shape}, true_beta shape {true_beta.shape}")
-    
     # Compute cosine similarity between estimated topics and true identity topics
     est_topics = beta_est.values.T  # shape: (n_est_topics, n_genes)
     true_topics = true_beta.values.T  # shape: (n_identity_topics, n_genes)
@@ -420,7 +412,6 @@ def match_topics_to_identities(beta_est: pd.DataFrame, true_beta: pd.DataFrame,
         true_topic_name = identity_topics[true_idx]
         topic_mapping[est_topic_name] = true_topic_name
         matched_identities.add(true_topic_name)
-        print(f"[INFO] Matched: {est_topic_name} -> {true_topic_name} (similarity: {similarity[est_idx, true_idx]:.3f})")
     
     # Assign activity topics to unmatched estimated topics
     unmatched_est = [col for col in beta_est.columns if col not in topic_mapping]
@@ -431,12 +422,10 @@ def match_topics_to_identities(beta_est: pd.DataFrame, true_beta: pd.DataFrame,
         if i < n_extra_topics:
             activity_name = f"V{i+1}"
             topic_mapping[est_topic] = activity_name
-            print(f"[INFO] Assigned activity: {est_topic} -> {activity_name}")
         else:
             # If we have more estimated topics than expected, assign as extra activity topics
             activity_name = f"V{i+1}"
             topic_mapping[est_topic] = activity_name
-            print(f"[INFO] Assigned extra activity: {est_topic} -> {activity_name}")
     
     return topic_mapping
 
@@ -446,7 +435,6 @@ def prepare_model_topics(model_name: str, beta: pd.DataFrame, theta: pd.DataFram
 
     if model_name == "HLDA":
         # HLDA already has meaningful labels, no matching needed
-        print(f"[INFO] {model_name} already has labeled topics: {list(beta.columns)}")
         topic_mapping = {col: col for col in beta.columns}  # Identity mapping
         return beta, theta, topic_mapping
     
@@ -455,19 +443,260 @@ def prepare_model_topics(model_name: str, beta: pd.DataFrame, theta: pd.DataFram
         true_beta = create_true_beta_from_counts(counts_df, identity_topics)
         
         # Match topics to identities
-        print(f"[INFO] Matching topics for {model_name}")
         topic_mapping = match_topics_to_identities(beta, true_beta, identity_topics, n_extra_topics)
         
         # Rename beta and theta columns using the mapping
         beta_renamed = beta.rename(columns=topic_mapping)
         theta_renamed = theta.rename(columns=topic_mapping)
         
-        print(f"[INFO] {model_name} topics after matching: {list(beta_renamed.columns)}")
-        
         return beta_renamed, theta_renamed, topic_mapping
     
     else:
         raise ValueError(f"Unknown model name: {model_name}")
+
+def plot_true_vs_estimated_similarity(true_beta: pd.DataFrame, estimated_beta: pd.DataFrame, 
+                                    model_name: str, out_png: Path):
+    """
+    Plot cosine similarity heatmap between true averaged gene expression profiles 
+    and estimated beta topics.
+    
+    Args:
+        true_beta: DataFrame with true averaged expression profiles (genes x identities)
+        estimated_beta: DataFrame with estimated topic distributions (genes x topics)
+        model_name: Name of the model for the plot title
+        out_png: Output path for the plot
+    """
+    # Compute cosine similarity between true and estimated profiles
+    # Normalize for cosine similarity
+    true_norms = np.linalg.norm(true_beta.values, axis=0, keepdims=True)
+    est_norms = np.linalg.norm(estimated_beta.values, axis=0, keepdims=True)
+    
+    true_normalized = true_beta.values / (true_norms + 1e-12)
+    est_normalized = estimated_beta.values / (est_norms + 1e-12)
+    
+    # Compute similarity matrix: true identities (rows) x estimated topics (columns)
+    similarity = true_normalized.T @ est_normalized  # shape: (n_identities, n_topics)
+    
+    # Create DataFrame for easier plotting
+    sim_df = pd.DataFrame(
+        similarity,
+        index=true_beta.columns,  # True identities
+        columns=estimated_beta.columns  # Estimated topics
+    )
+    
+    # Create the plot
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(sim_df, annot=True, fmt=".3f", cmap="viridis", 
+                cbar_kws={'label': 'Cosine Similarity'})
+    plt.title(f"True vs Estimated Similarity ({model_name})\nTrue Identities vs Estimated Topics")
+    plt.xlabel("Estimated Topics")
+    plt.ylabel("True Cell Type Identities")
+    plt.tight_layout()
+    
+    # Save the plot
+    ensure_dir(out_png.parent)
+    plt.savefig(out_png, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Also save the similarity matrix as CSV
+    sim_csv = out_png.with_suffix('.csv')
+    sim_df.to_csv(sim_csv)
+
+def plot_true_self_similarity(true_beta: pd.DataFrame, out_png: Path):
+    """
+    Plot cosine similarity heatmap between true averaged gene expression profiles 
+    against themselves (self-similarity matrix).
+    
+    Args:
+        true_beta: DataFrame with true averaged expression profiles (genes x identities)
+        out_png: Output path for the plot
+    """
+    # Compute cosine similarity between true profiles and themselves
+    # Normalize for cosine similarity
+    true_norms = np.linalg.norm(true_beta.values, axis=0, keepdims=True)
+    true_normalized = true_beta.values / (true_norms + 1e-12)
+    
+    # Compute self-similarity matrix: true identities (rows) x true identities (columns)
+    similarity = true_normalized.T @ true_normalized  # shape: (n_identities, n_identities)
+    
+    # Create DataFrame for easier plotting
+    sim_df = pd.DataFrame(
+        similarity,
+        index=true_beta.columns,  # True identities
+        columns=true_beta.columns  # True identities
+    )
+    
+    # Create the plot
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(sim_df, annot=True, fmt=".3f", cmap="viridis", 
+                cbar_kws={'label': 'Cosine Similarity'})
+    plt.title("True Identity Self-Similarity\nAveraged Gene Expression Profiles")
+    plt.xlabel("True Cell Type Identities")
+    plt.ylabel("True Cell Type Identities")
+    plt.tight_layout()
+    
+    # Save the plot
+    ensure_dir(out_png.parent)
+    plt.savefig(out_png, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Also save the similarity matrix as CSV
+    sim_csv = out_png.with_suffix('.csv')
+    sim_df.to_csv(sim_csv)
+    
+    # Print summary statistics
+    print(f"True identity self-similarity summary:")
+    print(f"  Mean similarity: {sim_df.values.mean():.3f}")
+    print(f"  Min similarity: {sim_df.values.min():.3f}")
+    print(f"  Max similarity: {sim_df.values.max():.3f}")
+
+def compute_perplexity_and_loglikelihood(X_test: np.ndarray, beta: np.ndarray, theta: np.ndarray) -> tuple[float, float]:
+    """
+    Compute perplexity and log-likelihood on test data.
+    
+    Args:
+        X_test: Test count matrix (cells x genes)
+        beta: Topic-gene distributions (genes x topics)
+        theta: Cell-topic distributions (cells x topics)
+    
+    Returns:
+        tuple: (perplexity, log_likelihood)
+    """
+    # Convert to proportions
+    X_prop = X_test / (X_test.sum(axis=1, keepdims=True) + 1e-12)
+    
+    # Compute reconstruction: theta @ beta.T
+    recon = theta @ beta.T
+    
+    # Normalize reconstruction
+    recon = recon / (recon.sum(axis=1, keepdims=True) + 1e-12)
+    
+    # Add small epsilon to avoid log(0)
+    eps = 1e-12
+    recon = np.clip(recon, eps, 1 - eps)
+    
+    # Compute log-likelihood
+    log_likelihood = np.sum(X_prop * np.log(recon))
+    
+    # Compute perplexity
+    n_tokens = X_test.sum()
+    perplexity = np.exp(-log_likelihood / n_tokens)
+    
+    return perplexity, log_likelihood
+
+def plot_umap_theta(theta: pd.DataFrame, cell_identities: pd.Series, model_name: str, out_png: Path):
+    """
+    Create UMAP visualization of theta matrix colored by cell type.
+    
+    Args:
+        theta: Cell-topic proportions (cells x topics)
+        cell_identities: Cell type identities
+        model_name: Name of the model
+        out_png: Output path for the plot
+    """
+    # Fit UMAP
+    try:
+        umap_reducer = UMAP(random_state=42, n_neighbors=15, min_dist=0.1)
+        theta_2d = umap_reducer.fit_transform(theta.values)
+    except ImportError:
+        print(f"  UMAP not available for {model_name}, skipping UMAP plot")
+        return
+    
+    # Create color mapping
+    unique_cell_types = sorted(cell_identities.unique())
+    colors = sns.color_palette("husl", n_colors=len(unique_cell_types))
+    color_map = dict(zip(unique_cell_types, colors))
+    
+    # Create plot
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    for cell_type in unique_cell_types:
+        mask = cell_identities == cell_type
+        if mask.any():
+            ax.scatter(theta_2d[mask, 0], theta_2d[mask, 1], 
+                      c=[color_map[cell_type]], label=cell_type, alpha=0.7, s=20)
+    
+    ax.set_xlabel("UMAP 1")
+    ax.set_ylabel("UMAP 2")
+    ax.set_title(f"UMAP of Topic Proportions ({model_name})")
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+    
+    # Save plot
+    ensure_dir(out_png.parent)
+    plt.savefig(out_png, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Compute silhouette score
+    try:
+        sil_score = silhouette_score(theta_2d, cell_identities)
+        print(f"  {model_name} UMAP silhouette score: {sil_score:.3f}")
+    except:
+        print(f"  {model_name} UMAP silhouette score: N/A (insufficient clusters)")
+
+def run_scanpy_comparison(counts_df: pd.DataFrame, output_dir: Path):
+    """
+    Run scanpy analysis for comparison with topic models.
+    
+    Args:
+        counts_df: Count matrix with cell identities in index
+        output_dir: Output directory
+    """
+    print("Running scanpy analysis...")
+    
+    # Create AnnData object
+    adata = sc.AnnData(X=counts_df.values)
+    adata.var_names = list(counts_df.columns)
+    adata.obs_names = list(counts_df.index)
+    
+    # Add cell type annotations
+    cell_identities = pd.Series([i.split("_")[0] for i in counts_df.index], index=counts_df.index)
+    adata.obs['cell_type'] = cell_identities.values
+    
+    # Basic preprocessing
+    sc.pp.normalize_total(adata, target_sum=1e4)
+    sc.pp.log1p(adata)
+    
+    # Find highly variable genes
+    sc.pp.highly_variable_genes(adata, min_mean=0.0125, max_mean=3, min_disp=0.5)
+    
+    # PCA
+    sc.pp.pca(adata, use_highly_variable=True)
+    
+    # Compute neighbors
+    sc.pp.neighbors(adata, n_neighbors=10, n_pcs=40)
+    
+    # UMAP
+    sc.tl.umap(adata)
+    
+    # Leiden clustering
+    sc.tl.leiden(adata, resolution=0.5)
+    
+    # Save results
+    plots_dir = output_dir / "scanpy"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    
+    # UMAP colored by cell type
+    sc.pl.umap(adata, color='cell_type', show=False)
+    plt.savefig(plots_dir / "scanpy_umap_cell_type.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # UMAP colored by leiden clusters
+    sc.pl.umap(adata, color='leiden', show=False)
+    plt.savefig(plots_dir / "scanpy_umap_leiden.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Compute silhouette score for scanpy UMAP
+    try:
+        sil_score = silhouette_score(adata.obsm['X_umap'], cell_identities)
+        print(f"  Scanpy UMAP silhouette score: {sil_score:.3f}")
+    except:
+        print(f"  Scanpy UMAP silhouette score: N/A")
+    
+    # Save scanpy results
+    adata.write(plots_dir / "scanpy_results.h5ad")
+    
+    return adata
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate topic models (HLDA, LDA, NMF) and run metrics/plots.")
@@ -501,7 +730,7 @@ def main():
             beta = pd.read_csv(model_files[m]["beta"], index_col=0)
             theta = pd.read_csv(model_files[m]["theta"], index_col=0)
             models[m] = {"beta": beta, "theta": theta}
-    print(f"[DEBUG] Models loaded: {list(models.keys())}")
+    print(f"Models loaded: {list(models.keys())}")
     
     # Parse identity topics and extra topics from command line arguments
     identity_topics = args.identity_topics.split(',')
@@ -519,12 +748,11 @@ def main():
         topic_mappings[m] = topic_mapping
     
     # 2) Stacked membership plots for each model
+    print("Generating structure plots...")
     for m, d in models.items():
-        print(f"[INFO] Starting stacked membership plotting for {m}")
         plots_dir = output_dir / m / "plots"
         plots_dir.mkdir(parents=True, exist_ok=True)
         out_png = plots_dir / f"{m}_structure_plot.png"
-        print(f"Plotting structure plot for {m} → {out_png}")
         
         # Create a custom title that includes matching information
         if m in ["LDA", "NMF"]:
@@ -536,8 +764,8 @@ def main():
         structure_plot_py(d["theta"], counts_df.index.to_series(), out_png, title=custom_title)
 
     # 3) Cosine similarity matrix heatmap of estimated beta topics (self-similarity)
+    print("Generating cosine similarity heatmaps...")
     for m, d in models.items():
-        print(f"[INFO] Starting cosine similarity heatmap for {m}")
         plots_dir = output_dir / m / "plots"
         plots_dir.mkdir(parents=True, exist_ok=True)
         beta = d["beta"]
@@ -555,7 +783,7 @@ def main():
 
     # 4) Geweke histograms for HLDA (A and D chains)
     if "HLDA" in models:
-        print(f"[INFO] Starting Geweke histogram plotting for HLDA")
+        print("Generating Geweke histograms for HLDA...")
         plots_dir = output_dir / "HLDA" / "plots"
         plots_dir.mkdir(parents=True, exist_ok=True)
         beta = models["HLDA"]["beta"]
@@ -563,12 +791,11 @@ def main():
         n_genes, n_topics = beta.shape
         n_cells = theta.shape[0]
         # Calculate n_save based on new parameters: 10k iterations, 4k burn-in, thin=20
-        n_loops, burn_in, thin = 15000, 5000, 40
+        n_loops, burn_in, thin = 10000, 4000, 20
         n_save = (n_loops - burn_in + 1) // thin
         sample_root = output_dir / "HLDA" / "samples"
         if not sample_root.exists():
             sample_root = output_dir / "HLDA"
-        print(f"Plotting Geweke histograms for HLDA in {plots_dir} (n_save={n_save})")
         try:
             plot_geweke_histograms(
                 sample_root=sample_root,
@@ -583,7 +810,7 @@ def main():
             print(f"[WARN] Could not plot Geweke histograms: {e}")
 
     # 5) PCA pair plots for each model
-    print(f"[INFO] Starting PCA pair plots for all models")
+    print("Generating PCA pair plots...")
     eigvecs, cell_proj = compute_pca_projection(counts_df)
     
     # Create true beta from count matrix averages for comparison
@@ -595,7 +822,6 @@ def main():
     cell_identities = pd.Series([i.split("_")[0] for i in counts_df.index], index=counts_df.index)
     
     for m, d in models.items():
-        print(f"[INFO] PCA pair plots for {m}")
         plots_dir = output_dir / m / "plots"
         plots_dir.mkdir(parents=True, exist_ok=True)
         beta = d["beta"]
@@ -615,7 +841,7 @@ def main():
             )
 
     # 6) SSE evaluation with custom topic order on held-out test set
-    print("Running SSE evaluation with custom topic order on held-out test set...")
+    print("Running SSE evaluation...")
     
     # Use the provided test_df (no need to create train/test split)
     test_identities = pd.Series([i.split("_")[0] for i in test_df.index], index=test_df.index)
@@ -633,10 +859,9 @@ def main():
             theta_out=plots_dir / f"{m}_test_theta_nnls.csv"
         )
         sse_df.to_csv(plots_dir / f"{m}_test_sse.csv", index=False)
-        print(f"[SSE] Saved {m} SSE results to {plots_dir / f'{m}_test_sse.csv'}")
 
     # 7) Extract top genes per topic for each model
-    print("[INFO] Extracting top genes per topic for all models...")
+    print("Extracting top genes per topic...")
     for m, d in models.items():
         plots_dir = output_dir / m / "plots"
         plots_dir.mkdir(parents=True, exist_ok=True)
@@ -644,11 +869,55 @@ def main():
         
         top_genes_df = extract_top_genes_per_topic(beta, n_top_genes=10)
         top_genes_df.to_csv(plots_dir / f"{m}_top_genes_per_topic.csv")
-        print(f"[TOP_GENES] Saved {m} top genes to {plots_dir / f'{m}_top_genes_per_topic.csv'}")
+
+    # 8) Plot true vs estimated similarity
+    print("Computing true vs estimated similarity...")
+    for m, d in models.items():
+        plots_dir = output_dir / m / "plots"
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        beta = d["beta"]
+        out_png = plots_dir / f"{m}_true_vs_estimated_similarity.png"
+        plot_true_vs_estimated_similarity(true_beta, beta, m, out_png)
+
+    # 9) Plot true identity self-similarity
+    print("Computing true identity self-similarity...")
+    plots_dir = output_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    out_png = plots_dir / "true_identity_self_similarity.png"
+    plot_true_self_similarity(true_beta, out_png)
     
     # NOTE: SSE evaluation is currently disabled due to missing dependencies (holdout_test_set, identity_topics, extra_topics)
     
     # Print bash command for eas
+
+    # 10) Compute perplexity and log-likelihood
+    print("Computing perplexity and log-likelihood...")
+    for m, d in models.items():
+        plots_dir = output_dir / m / "plots"
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        beta = d["beta"]
+        theta = d["theta"]
+        X_test = test_df.values
+        perplexity, log_likelihood = compute_perplexity_and_loglikelihood(X_test, beta, theta)
+        print(f"{m} perplexity: {perplexity}")
+        print(f"{m} log-likelihood: {log_likelihood}")
+
+    # 11) Plot UMAP of theta
+    print("Generating UMAP of theta...")
+    for m, d in models.items():
+        plots_dir = output_dir / m / "plots"
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        theta = d["theta"]
+        cell_identities = pd.Series([i.split("_")[0] for i in counts_df.index], index=counts_df.index)
+        out_png = plots_dir / f"{m}_umap_theta.png"
+        plot_umap_theta(theta, cell_identities, m, out_png)
+
+    # 12) Run scanpy comparison
+    print("Running scanpy comparison...")
+    try:
+        run_scanpy_comparison(counts_df, output_dir)
+    except Exception as e:
+        print(f"  Scanpy comparison failed: {e}")
 
 if __name__ == "__main__":
     main() 
