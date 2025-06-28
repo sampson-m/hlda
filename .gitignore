@@ -87,3 +87,5 @@ coverage.xml
 .mypy_cache/
 .dmypy.json
 dmypy.json 
+# Archive and experimental code
+_archive/
