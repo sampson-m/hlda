@@ -501,6 +501,7 @@ def main():
             beta = pd.read_csv(model_files[m]["beta"], index_col=0)
             theta = pd.read_csv(model_files[m]["theta"], index_col=0)
             models[m] = {"beta": beta, "theta": theta}
+    print(f"[DEBUG] Models loaded: {list(models.keys())}")
     
     # Parse identity topics and extra topics from command line arguments
     identity_topics = args.identity_topics.split(',')
@@ -562,7 +563,7 @@ def main():
         n_genes, n_topics = beta.shape
         n_cells = theta.shape[0]
         # Calculate n_save based on new parameters: 10k iterations, 4k burn-in, thin=20
-        n_loops, burn_in, thin = 10000, 4000, 20
+        n_loops, burn_in, thin = 15000, 5000, 40
         n_save = (n_loops - burn_in + 1) // thin
         sample_root = output_dir / "HLDA" / "samples"
         if not sample_root.exists():

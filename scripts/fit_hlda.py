@@ -391,7 +391,7 @@ def main():
     theta_df.columns = topic_names
 
     # Save outputs
-    hlda_dir = output_dir / "HLDA"
+    hlda_dir = output_dir
     hlda_dir.mkdir(parents=True, exist_ok=True)
     beta_df.to_csv(hlda_dir / "HLDA_beta.csv")
     theta_df.to_csv(hlda_dir / "HLDA_theta.csv")

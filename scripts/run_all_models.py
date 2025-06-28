@@ -85,9 +85,9 @@ def main():
             "--counts_csv", args.counts_csv,
             "--n_extra_topics", str(args.n_extra_topics),
             "--output_dir", str(output_dir / "HLDA"),
-            "--n_loops", "10000",
-            "--burn_in", "4000", 
-            "--thin", "20"
+            "--n_loops", "15000",
+            "--burn_in", "5000", 
+            "--thin", "40"
         ]
         if run_command(hlda_cmd, "HLDA Gibbs Sampling"):
             success_count += 1
