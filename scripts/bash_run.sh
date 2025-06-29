@@ -1,20 +1,19 @@
 #!/bin/bash
 
-# Example script to run the 7-topic fit with updated parameters
 # This assumes you have your data files ready and are running from the root directory
 
 # Set your data paths here (relative to root directory)
 COUNTS_CSV="data/pbmc/filtered_counts_train.csv"
 TEST_CSV="data/pbmc/filtered_counts_test.csv"
-OUTPUT_DIR="estimates/pbmc/8_topic_fit"
+OUTPUT_DIR="estimates/pbmc/9_topic_fit"
 
 # PBMC cell types (identity topics)
 IDENTITY_TOPICS="T cells,CD19+ B,CD56+ NK,CD34+,Dendritic,CD14+ Monocyte"
 
 # Number of extra activity topics (V1, V2)
-N_EXTRA_TOPICS=2
+N_EXTRA_TOPICS=3
 
-echo "Running 7-topic fit with updated parameters..."
+echo "Running 9-topic fit with updated parameters..."
 echo "Working directory: $(pwd)"
 echo "Counts file: $COUNTS_CSV"
 echo "Test file: $TEST_CSV"

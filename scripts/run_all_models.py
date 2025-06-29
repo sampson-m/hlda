@@ -9,32 +9,27 @@ import sys
 from pathlib import Path
 import time
 
+# Import default parameters from fit_hlda
+from fit_hlda import get_default_parameters
+
+# Get default HLDA parameters
+HLDA_PARAMS = get_default_parameters()
+
 def run_command(cmd, description):
     """Run a command and handle errors."""
-    print(f"\n{'='*60}")
     print(f"Running: {description}")
-    print(f"Command: {' '.join(cmd)}")
-    print(f"{'='*60}")
     
     start_time = time.time()
     try:
         result = subprocess.run(cmd, check=True, capture_output=True, text=True)
         elapsed = time.time() - start_time
-        print(f"✓ {description} completed successfully in {elapsed:.2f} seconds ({elapsed/60:.2f} min)")
-        if result.stdout:
-            print("Output:")
-            print(result.stdout)
+        print(f"✓ Completed in {elapsed:.1f}s")
         return True
     except subprocess.CalledProcessError as e:
         elapsed = time.time() - start_time
-        print(f"✗ {description} failed after {elapsed:.2f} seconds")
-        print(f"Error code: {e.returncode}")
-        if e.stdout:
-            print("Stdout:")
-            print(e.stdout)
+        print(f"✗ Failed after {elapsed:.1f}s (error code: {e.returncode})")
         if e.stderr:
-            print("Stderr:")
-            print(e.stderr)
+            print(f"Error: {e.stderr}")
         return False
 
 def main():
@@ -64,11 +59,7 @@ def main():
     n_extra = args.n_extra_topics
     total_topics = n_identity + n_extra
     
-    print(f"Model Configuration:")
-    print(f"  Identity topics: {identity_topics}")
-    print(f"  Extra topics: {n_extra}")
-    print(f"  Total topics: {total_topics}")
-    print(f"  Output directory: {args.output_dir}")
+    print(f"Configuration: {n_identity} identity + {n_extra} activity = {total_topics} total topics")
     
     # Create output directory
     output_dir = Path(args.output_dir)
@@ -85,9 +76,9 @@ def main():
             "--counts_csv", args.counts_csv,
             "--n_extra_topics", str(args.n_extra_topics),
             "--output_dir", str(output_dir / "HLDA"),
-            "--n_loops", "15000",
-            "--burn_in", "5000", 
-            "--thin", "40"
+            "--n_loops", str(HLDA_PARAMS['n_loops']),
+            "--burn_in", str(HLDA_PARAMS['burn_in']), 
+            "--thin", str(HLDA_PARAMS['thin'])
         ]
         if run_command(hlda_cmd, "HLDA Gibbs Sampling"):
             success_count += 1
@@ -121,20 +112,12 @@ def main():
             success_count += 1
     
     # Summary
-    print(f"\n{'='*60}")
-    print(f"SUMMARY")
-    print(f"{'='*60}")
-    print(f"Commands executed: {success_count}/{total_commands}")
-    print(f"Output directory: {output_dir}")
+    print(f"\nSummary: {success_count}/{total_commands} commands completed")
     
     if success_count == total_commands:
         print(f"✓ All models completed successfully!")
-        print(f"\nNext steps:")
-        print(f"1. Check plots in {output_dir}/*/plots/")
-        print(f"2. Review top genes in {output_dir}/*/plots/*_top_genes_per_topic.csv")
-        print(f"3. Analyze SSE results in {output_dir}/*/plots/*_test_sse.csv")
     else:
-        print(f"✗ Some commands failed. Check the output above for details.")
+        print(f"✗ Some commands failed.")
         sys.exit(1)
 
 if __name__ == "__main__":

@@ -174,6 +174,16 @@ def compute_posterior_means_from_memmaps(A_chain_path: Path,
     return beta_df, theta_df
 # --- End of moved functions ---
 
+def get_default_parameters():
+    """Return default parameters for HLDA fitting."""
+    return {
+        'n_loops': 10000,
+        'burn_in': 4000,
+        'thin': 20,
+        'alpha_beta': 0.1,
+        'alpha_c': 0.1
+    }
+
 def main():
     parser = argparse.ArgumentParser(description="Fit HLDA (Gibbs) to PBMC count matrix with cell type identity topics.")
     parser.add_argument("--counts_csv", type=str, required=True, help="Path to filtered count matrix CSV (index: cell type)")
@@ -219,90 +229,13 @@ def main():
         for cell_type in PBMC_CELL_TYPES
     }
 
-    # Debug: Print topic mappings and hierarchy
-    print(f"\n=== DEBUG: Topic Mappings ===")
-    print(f"TOPIC_STR2INT:")
-    for topic, idx in TOPIC_STR2INT.items():
-        print(f"  '{topic}' -> {idx}")
-    
-    print(f"\nTOPIC_INT2STR:")
-    for idx, topic in TOPIC_INT2STR.items():
-        print(f"  {idx} -> '{topic}'")
-    
-    print(f"\nIDENTITY_STR2INT:")
-    for cell_type, idx in IDENTITY_STR2INT.items():
-        print(f"  '{cell_type}' -> {idx}")
-    
-    print(f"\nTopic Hierarchy (topic_hierarchy_int):")
-    for ident_int, valid_topics in topic_hierarchy_int.items():
-        cell_type = IDENTITY_INT2STR[ident_int]
-        valid_names = [TOPIC_INT2STR[t] for t in valid_topics]
-        print(f"  {ident_int} ({cell_type}) -> {valid_topics} ({valid_names})")
-    
-    # Debug validation checks
-    print(f"\n=== DEBUG: Validation Checks ===")
-    print(f"Expected total topics: {total_topics}")
-    print(f"Actual TOPIC_STR2INT size: {len(TOPIC_STR2INT)}")
-    print(f"Identity topics: {n_identity}")
-    print(f"Activity topics: {n_activity}")
-    
-    # Check that all identity topics are in TOPIC_STR2INT
-    missing_identity = [ct for ct in PBMC_CELL_TYPES if ct not in TOPIC_STR2INT]
-    if missing_identity:
-        print(f"ERROR: Missing identity topics: {missing_identity}")
-    else:
-        print(f"✓ All identity topics present in TOPIC_STR2INT")
-    
-    # Check that all activity topics are in TOPIC_STR2INT
-    expected_activity = [f"V{i+1}" for i in range(n_activity)]
-    missing_activity = [at for at in expected_activity if at not in TOPIC_STR2INT]
-    if missing_activity:
-        print(f"ERROR: Missing activity topics: {missing_activity}")
-    else:
-        print(f"✓ All activity topics present in TOPIC_STR2INT")
-    
-    # Check topic hierarchy structure
-    print(f"\nTopic hierarchy validation:")
-    for ident_int, valid_topics in topic_hierarchy_int.items():
-        cell_type = IDENTITY_INT2STR[ident_int]
-        # Check that identity topic is first
-        if valid_topics[0] != TOPIC_STR2INT[cell_type]:
-            print(f"ERROR: {cell_type} identity topic not first in hierarchy")
-        else:
-            print(f"✓ {cell_type}: identity topic {valid_topics[0]} is first")
-        
-        # Check that all activity topics are included
-        expected_activity_indices = [TOPIC_STR2INT[f"V{i+1}"] for i in range(n_activity)]
-        missing_activity_indices = [idx for idx in expected_activity_indices if idx not in valid_topics[1:]]
-        if missing_activity_indices:
-            print(f"ERROR: {cell_type} missing activity topics: {missing_activity_indices}")
-        else:
-            print(f"✓ {cell_type}: all {n_activity} activity topics included")
-
-    print(f"\nPBMC HLDA Configuration:")
-    print(f"  Cell types (identity topics): {PBMC_CELL_TYPES}")
-    print(f"  Activity topics: {activity_topics}")
-    print(f"  Total topics: {total_topics}")
-    print(f"  Topic hierarchy:")
-    for cell_type in PBMC_CELL_TYPES:
-        ident_int = IDENTITY_STR2INT[cell_type]
-        valid_topics = topic_hierarchy_int[ident_int]
-        valid_names = [TOPIC_INT2STR[t] for t in valid_topics]
-        print(f"    {cell_type} -> {valid_names}")
-
     # Read count matrix
     df = pd.read_csv(args.counts_csv, index_col=0)
     cell_identities = list(df.index)
     n_genes = df.shape[1]
     n_cells = df.shape[0]
 
-    print(f"\nData summary:")
-    print(f"  Count matrix shape: {df.shape}")
-    print(f"  Cell types in data: {sorted(set(cell_identities))}")
-    print(f"  Cell type distribution:")
-    cell_type_counts = pd.Series(cell_identities).value_counts()
-    for cell_type, count in cell_type_counts.items():
-        print(f"    {cell_type}: {count} cells")
+    print(f"Data: {df.shape[0]} cells, {df.shape[1]} genes")
 
     # Initialize long data
     long_data, n_cells, n_genes = initialize_long_data(
@@ -353,7 +286,7 @@ def main():
     )
 
     # Run Gibbs sampler
-    print(f"\nRunning HLDA Gibbs sampler with {total_topics} topics ({n_identity} identity, {n_activity} activity)...")
+    print(f"Running HLDA Gibbs sampler ({total_topics} topics)...")
     start_time = time.time()
     saved_count = gibbs_and_write_memmap(
         cell_idx_arr.astype(np.int32),
@@ -374,6 +307,7 @@ def main():
         raise RuntimeError(f"Expected to save {n_save} slices, but Numba returned {saved_count}")
 
     # Compute posterior means
+    print("Computing posterior means...")
     beta_df, theta_df = compute_posterior_means_from_memmaps(
         A_chain_path=A_chain_path,
         D_chain_path=D_chain_path,
@@ -402,11 +336,7 @@ def main():
         'topic_type': ['identity'] * n_identity + ['activity'] * n_activity
     })
     topic_info.to_csv(hlda_dir / "topic_info.csv", index=False)
-    print(f"\n✔ HLDA fit complete. Results saved to {hlda_dir}")
-    print(f"  • HLDA_beta.csv: Gene-topic distributions")
-    print(f"  • HLDA_theta.csv: Cell-topic distributions") 
-    print(f"  • topic_info.csv: Topic mapping information")
-    print(f"  • samples/: Gibbs sampling chains")
+    print(f"HLDA fit complete. Results saved to {hlda_dir}")
 
 if __name__ == "__main__":
     main() 

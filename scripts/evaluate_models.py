@@ -1,8 +1,15 @@
+#!/usr/bin/env python3
+"""
+Evaluation script for comparing HLDA, LDA, and NMF models.
+"""
+
 import argparse
 import pandas as pd
 from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.axes import Axes
 import seaborn as sns
 from sklearn.decomposition import PCA
 from typing import Optional
@@ -10,11 +17,23 @@ from sklearn.metrics.pairwise import cosine_similarity
 import cvxpy as cp
 from scipy.optimize import nnls
 from scipy.optimize import linear_sum_assignment
-import scanpy as sc
 from sklearn.manifold import TSNE
 from sklearn.metrics import silhouette_score
 import warnings
 warnings.filterwarnings('ignore')
+
+# Import default parameters from fit_hlda
+from fit_hlda import get_default_parameters
+
+# Get default HLDA parameters
+HLDA_PARAMS = get_default_parameters()
+
+# Override with actual parameters used
+HLDA_PARAMS.update({
+    'n_loops': 15000,
+    'burn_in': 5000,
+    'thin': 40
+})
 
 # --- PBMC Cell Type Definitions (matching fit_hlda.py) ---
 PBMC_CELL_TYPES = [
@@ -143,7 +162,7 @@ def plot_geweke_histograms(sample_root: Path, keys: list[str], out_dir: Path, n_
 def structure_plot_py(
     theta: pd.DataFrame,
     identities: pd.Series | list[str],
-    out_png: str | Path,
+    out_png: Optional[str | Path] = None,
     topics: Optional[list[str]] = None,
     max_cells: int = 500,
     gap: int = 1,
@@ -151,6 +170,8 @@ def structure_plot_py(
     random_state: int = 42,
     figsize: tuple = (14, 4),
     title: Optional[str] = None,
+    fig: Optional[Figure] = None,
+    ax: Optional[Axes] = None,
 ):
     """
     Python version of structure_plot: stacked bar plot of topic proportions, ordered by 1D PCA within group, with group gaps.
@@ -219,7 +240,11 @@ def structure_plot_py(
     for idx in theta.index:
         if idx in plot_theta.index:
             plot_theta.loc[idx] = theta.loc[idx, topics]
-    fig, ax = plt.subplots(figsize=figsize)
+    
+    # Use provided fig/ax or create new ones
+    if fig is None or ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    
     bottom = np.zeros(len(plot_theta))
     for topic in topics:
         values = plot_theta[topic].to_numpy(dtype=float)
@@ -251,9 +276,12 @@ def structure_plot_py(
     ax.legend(bbox_to_anchor=(1.01, 1), loc='upper left', fontsize=10, title="Topics")
     ax.set_title(title if title is not None else "Structure Plot: Topic Membership by Cell")
     ax.grid(axis="y", linestyle=":", alpha=0.5)
-    plt.tight_layout(rect=(0, 0, 0.85, 1))
-    plt.savefig(out_png, dpi=300, bbox_inches='tight')
-    plt.close(fig)
+    
+    # Only save if this is a standalone plot (not part of subplot) and out_png is provided
+    if (fig is None or ax is None) and out_png is not None:
+        plt.tight_layout(rect=(0, 0, 0.85, 1))
+        plt.savefig(out_png, dpi=300, bbox_inches='tight')
+        plt.close(fig)
 
 def estimate_theta_simplex(X: np.ndarray, B, l1) -> np.ndarray:
     B = np.asarray(B)
@@ -562,6 +590,14 @@ def compute_perplexity_and_loglikelihood(X_test: np.ndarray, beta: np.ndarray, t
     Returns:
         tuple: (perplexity, log_likelihood)
     """
+    # Convert to numpy arrays if they're pandas DataFrames
+    if isinstance(X_test, pd.DataFrame):
+        X_test = X_test.values
+    if isinstance(beta, pd.DataFrame):
+        beta = beta.values
+    if isinstance(theta, pd.DataFrame):
+        theta = theta.values
+    
     # Convert to proportions
     X_prop = X_test / (X_test.sum(axis=1, keepdims=True) + 1e-12)
     
@@ -596,6 +632,7 @@ def plot_umap_theta(theta: pd.DataFrame, cell_identities: pd.Series, model_name:
     """
     # Fit UMAP
     try:
+        from umap import UMAP
         umap_reducer = UMAP(random_state=42, n_neighbors=15, min_dist=0.1)
         theta_2d = umap_reducer.fit_transform(theta.values)
     except ImportError:
@@ -626,77 +663,225 @@ def plot_umap_theta(theta: pd.DataFrame, cell_identities: pd.Series, model_name:
     ensure_dir(out_png.parent)
     plt.savefig(out_png, dpi=300, bbox_inches='tight')
     plt.close()
-    
-    # Compute silhouette score
-    try:
-        sil_score = silhouette_score(theta_2d, cell_identities)
-        print(f"  {model_name} UMAP silhouette score: {sil_score:.3f}")
-    except:
-        print(f"  {model_name} UMAP silhouette score: N/A (insufficient clusters)")
 
-def run_scanpy_comparison(counts_df: pd.DataFrame, output_dir: Path):
+def plot_umap_activity(theta: pd.DataFrame, activity_topics: list, model_name: str, out_png: Path):
     """
-    Run scanpy analysis for comparison with topic models.
+    Create UMAP visualization of theta matrix colored by activity topic usage (sum of V1, V2, V3).
+    """
+    try:
+        from umap import UMAP
+        umap_reducer = UMAP(random_state=42, n_neighbors=15, min_dist=0.1)
+        theta_2d = umap_reducer.fit_transform(theta.values)
+    except ImportError:
+        print(f"  UMAP not available for {model_name}, skipping activity UMAP plot")
+        return
+    # Compute activity usage
+    activity_cols = [col for col in theta.columns if col in activity_topics]
+    if not activity_cols:
+        print(f"  No activity topics found for {model_name}, skipping activity UMAP plot")
+        return
+    activity_usage = theta[activity_cols].sum(axis=1)
+    # Create plot
+    fig, ax = plt.subplots(figsize=(10, 8))
+    sc = ax.scatter(theta_2d[:, 0], theta_2d[:, 1], c=activity_usage, cmap="viridis", alpha=0.7, s=20)
+    plt.colorbar(sc, ax=ax, label="Activity Topic Usage (sum)")
+    ax.set_xlabel("UMAP 1")
+    ax.set_ylabel("UMAP 2")
+    ax.set_title(f"UMAP of Topic Proportions ({model_name})\nColored by Activity Topic Usage")
+    plt.tight_layout()
+    ensure_dir(out_png.parent)
+    plt.savefig(out_png, dpi=300, bbox_inches='tight')
+    plt.close()
+
+def compare_activity_topic_genes(models: dict, activity_topics: list[str], out_dir: Path, n_top_genes: int = 20):
+    """
+    Compare top genes across activity topics (V1, V2, V3, etc.) between models.
     
     Args:
-        counts_df: Count matrix with cell identities in index
-        output_dir: Output directory
+        models: Dictionary of model data with 'beta' DataFrames
+        activity_topics: List of activity topic names (e.g., ['V1', 'V2', 'V3'])
+        out_dir: Output directory for plots and CSV files
+        n_top_genes: Number of top genes to compare per topic
     """
-    print("Running scanpy analysis...")
-    
-    # Create AnnData object
-    adata = sc.AnnData(X=counts_df.values)
-    adata.var_names = list(counts_df.columns)
-    adata.obs_names = list(counts_df.index)
-    
-    # Add cell type annotations
-    cell_identities = pd.Series([i.split("_")[0] for i in counts_df.index], index=counts_df.index)
-    adata.obs['cell_type'] = cell_identities.values
-    
-    # Basic preprocessing
-    sc.pp.normalize_total(adata, target_sum=1e4)
-    sc.pp.log1p(adata)
-    
-    # Find highly variable genes
-    sc.pp.highly_variable_genes(adata, min_mean=0.0125, max_mean=3, min_disp=0.5)
-    
-    # PCA
-    sc.pp.pca(adata, use_highly_variable=True)
-    
-    # Compute neighbors
-    sc.pp.neighbors(adata, n_neighbors=10, n_pcs=40)
-    
-    # UMAP
-    sc.tl.umap(adata)
-    
-    # Leiden clustering
-    sc.tl.leiden(adata, resolution=0.5)
-    
-    # Save results
-    plots_dir = output_dir / "scanpy"
+    # Create output directory
+    plots_dir = out_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
     
-    # UMAP colored by cell type
-    sc.pl.umap(adata, color='cell_type', show=False)
-    plt.savefig(plots_dir / "scanpy_umap_cell_type.png", dpi=300, bbox_inches='tight')
-    plt.close()
+    # Extract top genes for each activity topic in each model
+    activity_genes = {}
+    for model_name, model_data in models.items():
+        beta = model_data["beta"]
+        activity_genes[model_name] = {}
+        
+        for topic in activity_topics:
+            if topic in beta.columns:
+                top_genes = beta[topic].nlargest(n_top_genes).index.tolist()
+                activity_genes[model_name][topic] = top_genes
     
-    # UMAP colored by leiden clusters
-    sc.pl.umap(adata, color='leiden', show=False)
-    plt.savefig(plots_dir / "scanpy_umap_leiden.png", dpi=300, bbox_inches='tight')
-    plt.close()
+    # Create comparison plots for each activity topic
+    for topic in activity_topics:
+        # Check if this topic exists in any model
+        topic_models = {model: genes.get(topic, []) for model, genes in activity_genes.items()}
+        if not any(topic_models.values()):
+            continue
+            
+        # Create Venn diagram or heatmap showing gene overlap
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+        
+        # Plot 1: Gene overlap heatmap
+        model_names = list(topic_models.keys())
+        overlap_matrix = np.zeros((len(model_names), len(model_names)))
+        
+        for i, model1 in enumerate(model_names):
+            for j, model2 in enumerate(model_names):
+                genes1 = set(topic_models[model1])
+                genes2 = set(topic_models[model2])
+                if len(genes1) > 0 and len(genes2) > 0:
+                    overlap = len(genes1.intersection(genes2))
+                    overlap_matrix[i, j] = overlap
+        
+        # Create heatmap
+        sns.heatmap(overlap_matrix, annot=True, fmt='d', cmap='Blues', 
+                   xticklabels=model_names, yticklabels=model_names, ax=axes[0])
+        axes[0].set_title(f'Gene Overlap Matrix for {topic}\n(Number of shared genes)')
+        axes[0].set_xlabel('Models')
+        axes[0].set_ylabel('Models')
+        
+        # Plot 2: Top genes comparison table
+        axes[1].axis('off')
+        
+        # Create a table showing top genes for each model
+        max_genes = max(len(genes) for genes in topic_models.values())
+        table_data = []
+        for model in model_names:
+            genes = topic_models[model]
+            # Pad with empty strings
+            padded_genes = genes + [''] * (max_genes - len(genes))
+            table_data.append([model] + padded_genes)
+        
+        # Create table
+        col_labels = ['Model'] + [f'Gene_{i+1}' for i in range(max_genes)]
+        table = axes[1].table(cellText=table_data, colLabels=col_labels, 
+                             cellLoc='left', loc='center')
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1, 2)
+        
+        # Color code cells based on gene overlap
+        for i, model1 in enumerate(model_names):
+            genes1 = set(topic_models[model1])
+            for j in range(1, len(col_labels)):  # Skip model name column
+                if j-1 < len(topic_models[model1]):
+                    gene = topic_models[model1][j-1]
+                    # Check if this gene appears in other models
+                    shared_count = sum(1 for model2 in model_names 
+                                     if gene in set(topic_models[model2]))
+                    if shared_count > 1:
+                        # Color based on how many models share this gene
+                        color_intensity = min(0.9, 0.3 + 0.2 * shared_count)
+                        table[(i+1, j)].set_facecolor(f'lightblue')
+        
+        axes[1].set_title(f'Top {n_top_genes} Genes for {topic} Across Models\n(Shared genes highlighted)')
+        
+        plt.tight_layout()
+        plt.savefig(plots_dir / f'activity_topic_{topic}_gene_comparison.png', 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # Save detailed comparison as CSV
+        comparison_data = []
+        for model in model_names:
+            genes = topic_models[model]
+            for rank, gene in enumerate(genes, 1):
+                # Check which other models have this gene
+                shared_with = []
+                for other_model in model_names:
+                    if other_model != model and gene in set(topic_models[other_model]):
+                        shared_with.append(other_model)
+                
+                comparison_data.append({
+                    'model': model,
+                    'topic': topic,
+                    'gene': gene,
+                    'rank': rank,
+                    'shared_with': ', '.join(shared_with) if shared_with else 'None',
+                    'shared_count': len(shared_with)
+                })
+        
+        comparison_df = pd.DataFrame(comparison_data)
+        comparison_df.to_csv(plots_dir / f'activity_topic_{topic}_gene_comparison.csv', index=False)
     
-    # Compute silhouette score for scanpy UMAP
-    try:
-        sil_score = silhouette_score(adata.obsm['X_umap'], cell_identities)
-        print(f"  Scanpy UMAP silhouette score: {sil_score:.3f}")
-    except:
-        print(f"  Scanpy UMAP silhouette score: N/A")
+    # Create overall summary statistics
+    summary_data = []
+    for topic in activity_topics:
+        topic_models = {model: genes.get(topic, []) for model, genes in activity_genes.items()}
+        if not any(topic_models.values()):
+            continue
+            
+        # Calculate overlap statistics
+        all_genes = set()
+        for genes in topic_models.values():
+            all_genes.update(genes)
+        
+        # Count how many models each gene appears in
+        gene_counts = {}
+        for gene in all_genes:
+            count = sum(1 for genes in topic_models.values() if gene in genes)
+            gene_counts[gene] = count
+        
+        # Summary statistics
+        total_unique_genes = len(all_genes)
+        shared_genes = sum(1 for count in gene_counts.values() if count > 1)
+        avg_models_per_gene = sum(gene_counts.values()) / len(gene_counts) if gene_counts else 0
+        
+        summary_data.append({
+            'topic': topic,
+            'total_unique_genes': total_unique_genes,
+            'shared_genes': shared_genes,
+            'shared_percentage': (shared_genes / total_unique_genes * 100) if total_unique_genes > 0 else 0,
+            'avg_models_per_gene': avg_models_per_gene
+        })
     
-    # Save scanpy results
-    adata.write(plots_dir / "scanpy_results.h5ad")
+    summary_df = pd.DataFrame(summary_data)
+    summary_df.to_csv(plots_dir / 'activity_topic_gene_summary.csv', index=False)
     
-    return adata
+    # Create summary plot
+    if summary_data:
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        
+        # Plot 1: Shared vs unique genes
+        topics = [d['topic'] for d in summary_data]
+        shared = [d['shared_genes'] for d in summary_data]
+        unique = [d['total_unique_genes'] - d['shared_genes'] for d in summary_data]
+        
+        x = np.arange(len(topics))
+        width = 0.35
+        
+        axes[0].bar(x - width/2, shared, width, label='Shared Genes', color='lightblue')
+        axes[0].bar(x + width/2, unique, width, label='Unique Genes', color='lightcoral')
+        
+        axes[0].set_xlabel('Activity Topics')
+        axes[0].set_ylabel('Number of Genes')
+        axes[0].set_title('Gene Sharing Across Models by Activity Topic')
+        axes[0].set_xticks(x)
+        axes[0].set_xticklabels(topics)
+        axes[0].legend()
+        
+        # Plot 2: Average models per gene
+        avg_models = [d['avg_models_per_gene'] for d in summary_data]
+        axes[1].bar(topics, avg_models, color='skyblue')
+        axes[1].set_xlabel('Activity Topics')
+        axes[1].set_ylabel('Average Models per Gene')
+        axes[1].set_title('Gene Conservation Across Models')
+        axes[1].tick_params(axis='x', rotation=45)
+        
+        plt.tight_layout()
+        plt.savefig(plots_dir / 'activity_topic_gene_summary_plots.png', 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    print(f"Activity topic gene comparison saved to {plots_dir}")
+    return activity_genes
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate topic models (HLDA, LDA, NMF) and run metrics/plots.")
@@ -749,11 +934,21 @@ def main():
     
     # 2) Stacked membership plots for each model
     print("Generating structure plots...")
+    
+    # Create global color mapping for consistent colors across all models
+    all_topics = set()
     for m, d in models.items():
-        plots_dir = output_dir / m / "plots"
-        plots_dir.mkdir(parents=True, exist_ok=True)
-        out_png = plots_dir / f"{m}_structure_plot.png"
-        
+        all_topics.update(d["theta"].columns)
+    
+    # Sort topics to ensure consistent ordering
+    all_topics_sorted = sorted(all_topics)
+    
+    # Create color palette for all possible topics
+    palette = sns.color_palette("colorblind", n_colors=len(all_topics_sorted))
+    global_colors = {topic: palette[i] for i, topic in enumerate(all_topics_sorted)}
+    
+    # First, create individual structure plots for each model in their respective folders
+    for m, d in models.items():
         # Create a custom title that includes matching information
         if m in ["LDA", "NMF"]:
             mapping_info = ", ".join([f"{orig}→{mapped}" for orig, mapped in topic_mappings[m].items()])
@@ -761,13 +956,50 @@ def main():
         else:
             custom_title = f"Structure Plot: Topic Membership by Cell ({m})"
         
-        structure_plot_py(d["theta"], counts_df.index.to_series(), out_png, title=custom_title)
+        # Filter global colors to only include topics present in this model
+        model_topics = d["theta"].columns
+        model_colors = {topic: global_colors[topic] for topic in model_topics if topic in global_colors}
+        
+        # Create individual structure plot in the model's folder
+        model_plots_dir = output_dir / m / "plots"
+        model_plots_dir.mkdir(parents=True, exist_ok=True)
+        individual_out_png = model_plots_dir / f"{m}_structure_plot.png"
+        structure_plot_py(d["theta"], counts_df.index.to_series(), individual_out_png, 
+                         title=custom_title, colors=model_colors)
+    
+    # Now create combined structure plot with three independent plots stacked vertically
+    fig, axes = plt.subplots(len(models), 1, figsize=(14, 4 * len(models)))
+    if len(models) == 1:
+        axes = [axes]
+    
+    for i, (m, d) in enumerate(models.items()):
+        # Create a custom title that includes matching information
+        if m in ["LDA", "NMF"]:
+            mapping_info = ", ".join([f"{orig}→{mapped}" for orig, mapped in topic_mappings[m].items()])
+            custom_title = f"Structure Plot: Topic Membership by Cell ({m}) - Matched: {mapping_info}"
+        else:
+            custom_title = f"Structure Plot: Topic Membership by Cell ({m})"
+        
+        # Filter global colors to only include topics present in this model
+        model_topics = d["theta"].columns
+        model_colors = {topic: global_colors[topic] for topic in model_topics if topic in global_colors}
+        
+        # Add to combined plot
+        structure_plot_py(d["theta"], counts_df.index.to_series(), None, 
+                         title=custom_title, fig=fig, ax=axes[i], colors=model_colors)
+    
+    # Save combined structure plot
+    combined_plots_dir = output_dir / "plots"
+    combined_plots_dir.mkdir(parents=True, exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(combined_plots_dir / "combined_structure_plots.png", dpi=300, bbox_inches='tight')
+    plt.close()
 
     # 3) Cosine similarity matrix heatmap of estimated beta topics (self-similarity)
     print("Generating cosine similarity heatmaps...")
     for m, d in models.items():
-        plots_dir = output_dir / m / "plots"
-        plots_dir.mkdir(parents=True, exist_ok=True)
+        model_plots_dir = output_dir / m / "plots"
+        model_plots_dir.mkdir(parents=True, exist_ok=True)
         beta = d["beta"]
         # Compute cosine similarity between topics (columns)
         topic_matrix = beta.values  # shape: (n_genes, n_topics)
@@ -777,22 +1009,25 @@ def main():
         sns.heatmap(sim_df, annot=True, fmt=".2f", cmap="viridis")
         plt.title(f"Cosine Similarity Between Topics ({m})")
         plt.tight_layout()
-        out_png = plots_dir / f"{m}_beta_cosine_similarity.png"
+        out_png = model_plots_dir / f"{m}_beta_cosine_similarity.png"
         plt.savefig(out_png, dpi=150)
         plt.close()
 
     # 4) Geweke histograms for HLDA (A and D chains)
     if "HLDA" in models:
         print("Generating Geweke histograms for HLDA...")
-        plots_dir = output_dir / "HLDA" / "plots"
-        plots_dir.mkdir(parents=True, exist_ok=True)
+        hlda_plots_dir = output_dir / "HLDA" / "plots"
+        hlda_plots_dir.mkdir(parents=True, exist_ok=True)
         beta = models["HLDA"]["beta"]
         theta = models["HLDA"]["theta"]
         n_genes, n_topics = beta.shape
         n_cells = theta.shape[0]
-        # Calculate n_save based on new parameters: 10k iterations, 4k burn-in, thin=20
-        n_loops, burn_in, thin = 10000, 4000, 20
-        n_save = (n_loops - burn_in + 1) // thin
+        # Calculate n_save based on actual parameters used in HLDA run
+        n_loops = HLDA_PARAMS['n_loops']
+        burn_in = HLDA_PARAMS['burn_in']
+        thin = HLDA_PARAMS['thin']
+        n_save = (n_loops - burn_in) // thin
+        print(f"  Expected n_save: {n_save} (n_loops={n_loops}, burn_in={burn_in}, thin={thin})")
         sample_root = output_dir / "HLDA" / "samples"
         if not sample_root.exists():
             sample_root = output_dir / "HLDA"
@@ -800,14 +1035,15 @@ def main():
             plot_geweke_histograms(
                 sample_root=sample_root,
                 keys=["A", "D"],
-                out_dir=plots_dir,
+                out_dir=hlda_plots_dir,
                 n_save=n_save,
                 n_cells=n_cells,
                 n_genes=n_genes,
                 n_topics=n_topics
             )
         except Exception as e:
-            print(f"[WARN] Could not plot Geweke histograms: {e}")
+            print(f"  [WARN] Could not plot Geweke histograms: {e}")
+            print(f"  This might be due to memmap file size mismatch. Check if the actual HLDA parameters match the expected ones.")
 
     # 5) PCA pair plots for each model
     print("Generating PCA pair plots...")
@@ -822,8 +1058,8 @@ def main():
     cell_identities = pd.Series([i.split("_")[0] for i in counts_df.index], index=counts_df.index)
     
     for m, d in models.items():
-        plots_dir = output_dir / m / "plots"
-        plots_dir.mkdir(parents=True, exist_ok=True)
+        model_plots_dir = output_dir / m / "plots"
+        model_plots_dir.mkdir(parents=True, exist_ok=True)
         beta = d["beta"]
         est_names = list(beta.columns)
         beta_est_proj = eigvecs @ beta.values.astype(np.float32)
@@ -831,7 +1067,7 @@ def main():
         mixture_mask = np.zeros(cell_proj.shape[0], dtype=bool)
         pc_pairs = [(0, 1), (2, 3), (4, 5)]
         for pcx, pcy in pc_pairs:
-            out_png = plots_dir / f"{m}_PC{pcx+1}{pcy+1}.png"
+            out_png = model_plots_dir / f"{m}_PC{pcx+1}{pcy+1}.png"
             plot_pca_pair(
                 pcx, pcy,
                 beta_est_proj, est_names, label_mask,
@@ -846,9 +1082,10 @@ def main():
     # Use the provided test_df (no need to create train/test split)
     test_identities = pd.Series([i.split("_")[0] for i in test_df.index], index=test_df.index)
     
+    all_sse_results = []
     for m, d in models.items():
-        plots_dir = output_dir / m / "plots"
-        plots_dir.mkdir(parents=True, exist_ok=True)
+        model_plots_dir = output_dir / m / "plots"
+        model_plots_dir.mkdir(parents=True, exist_ok=True)
         beta = d["beta"]
         
         sse_df = incremental_sse_custom(
@@ -856,68 +1093,96 @@ def main():
             beta,
             test_identities,
             extra_topics,
-            theta_out=plots_dir / f"{m}_test_theta_nnls.csv"
+            theta_out=model_plots_dir / f"{m}_test_theta_nnls.csv"
         )
-        sse_df.to_csv(plots_dir / f"{m}_test_sse.csv", index=False)
+        sse_df.to_csv(model_plots_dir / f"{m}_test_sse.csv", index=False)
+        
+        # Add model column and collect for summary
+        sse_df['model'] = m
+        all_sse_results.append(sse_df)
+    
+    # Combine all SSE results
+    if all_sse_results:
+        combined_sse_df = pd.concat(all_sse_results, ignore_index=True)
+        combined_sse_df.to_csv(output_dir / "sse_summary.csv", index=False)
 
     # 7) Extract top genes per topic for each model
     print("Extracting top genes per topic...")
     for m, d in models.items():
-        plots_dir = output_dir / m / "plots"
-        plots_dir.mkdir(parents=True, exist_ok=True)
+        model_plots_dir = output_dir / m / "plots"
+        model_plots_dir.mkdir(parents=True, exist_ok=True)
         beta = d["beta"]
         
         top_genes_df = extract_top_genes_per_topic(beta, n_top_genes=10)
-        top_genes_df.to_csv(plots_dir / f"{m}_top_genes_per_topic.csv")
+        top_genes_df.to_csv(model_plots_dir / f"{m}_top_genes_per_topic.csv")
 
     # 8) Plot true vs estimated similarity
     print("Computing true vs estimated similarity...")
     for m, d in models.items():
-        plots_dir = output_dir / m / "plots"
-        plots_dir.mkdir(parents=True, exist_ok=True)
+        model_plots_dir = output_dir / m / "plots"
+        model_plots_dir.mkdir(parents=True, exist_ok=True)
         beta = d["beta"]
-        out_png = plots_dir / f"{m}_true_vs_estimated_similarity.png"
+        out_png = model_plots_dir / f"{m}_true_vs_estimated_similarity.png"
         plot_true_vs_estimated_similarity(true_beta, beta, m, out_png)
 
     # 9) Plot true identity self-similarity
     print("Computing true identity self-similarity...")
-    plots_dir = output_dir / "plots"
-    plots_dir.mkdir(parents=True, exist_ok=True)
-    out_png = plots_dir / "true_identity_self_similarity.png"
+    common_plots_dir = output_dir / "plots"
+    common_plots_dir.mkdir(parents=True, exist_ok=True)
+    out_png = common_plots_dir / "true_identity_self_similarity.png"
     plot_true_self_similarity(true_beta, out_png)
+    
+    # Save expression averaged topics (true beta) as CSV
+    true_beta.to_csv(common_plots_dir / "expression_averaged_topics.csv")
     
     # NOTE: SSE evaluation is currently disabled due to missing dependencies (holdout_test_set, identity_topics, extra_topics)
     
     # Print bash command for eas
 
-    # 10) Compute perplexity and log-likelihood
+    # 10) Compute perplexity and log-likelihood, and save metrics
     print("Computing perplexity and log-likelihood...")
+    metrics = []
     for m, d in models.items():
-        plots_dir = output_dir / m / "plots"
-        plots_dir.mkdir(parents=True, exist_ok=True)
+        model_plots_dir = output_dir / m / "plots"
+        model_plots_dir.mkdir(parents=True, exist_ok=True)
         beta = d["beta"]
         theta = d["theta"]
         X_test = test_df.values
-        perplexity, log_likelihood = compute_perplexity_and_loglikelihood(X_test, beta, theta)
+        # Estimate theta for test data using the learned beta
+        X_test_prop = test_df.div(test_df.sum(axis=1), axis=0).values
+        theta_test = estimate_theta_simplex(X_test_prop, beta.values, l1=0.002)
+        perplexity, log_likelihood = compute_perplexity_and_loglikelihood(X_test, beta.values, theta_test)
         print(f"{m} perplexity: {perplexity}")
         print(f"{m} log-likelihood: {log_likelihood}")
+        metrics.append({
+            "model": m,
+            "perplexity": perplexity,
+            "log_likelihood": log_likelihood
+        })
+    # Save metrics summary
+    metrics_df = pd.DataFrame(metrics)
+    metrics_df.to_csv(output_dir / "metrics_summary.csv", index=False)
 
-    # 11) Plot UMAP of theta
+    # 11) Plot UMAP of theta (cell type) and activity topic usage
     print("Generating UMAP of theta...")
     for m, d in models.items():
-        plots_dir = output_dir / m / "plots"
-        plots_dir.mkdir(parents=True, exist_ok=True)
+        model_plots_dir = output_dir / m / "plots"
+        model_plots_dir.mkdir(parents=True, exist_ok=True)
         theta = d["theta"]
         cell_identities = pd.Series([i.split("_")[0] for i in counts_df.index], index=counts_df.index)
-        out_png = plots_dir / f"{m}_umap_theta.png"
+        out_png = model_plots_dir / f"{m}_umap_theta.png"
         plot_umap_theta(theta, cell_identities, m, out_png)
+        # Activity topic UMAP
+        activity_topics = [f"V{i+1}" for i in range(args.n_extra_topics)]
+        out_png_activity = model_plots_dir / f"{m}_umap_activity.png"
+        plot_umap_activity(theta, activity_topics, m, out_png_activity)
 
-    # 12) Run scanpy comparison
-    print("Running scanpy comparison...")
-    try:
-        run_scanpy_comparison(counts_df, output_dir)
-    except Exception as e:
-        print(f"  Scanpy comparison failed: {e}")
+    # 12) Compare activity topic genes
+    print("Comparing activity topic genes...")
+    compare_activity_topic_genes(models, activity_topics, out_dir=output_dir, n_top_genes=20)
+
+    # 13) Remove scanpy comparison
+    # (code removed)
 
 if __name__ == "__main__":
     main() 
