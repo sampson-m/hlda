@@ -5,21 +5,7 @@ import numpy as np
 from numba import njit
 from numba.typed import List as TypedList
 import time
-
-# --- PBMC Cell Type Definitions ---------------------------------------------------------
-# Define the PBMC cell types from your data
-PBMC_CELL_TYPES = [
-    'T cells',
-    'CD19+ B', 
-    'CD56+ NK',
-    'CD34+',
-    'Dendritic',
-    'CD14+ Monocyte'
-]
-
-# Identity mappings (just the cell types, not activity topics)
-IDENTITY_STR2INT = {cell_type: i for i, cell_type in enumerate(PBMC_CELL_TYPES)}
-IDENTITY_INT2STR = {v: k for k, v in IDENTITY_STR2INT.items()}
+import yaml
 
 # --- HLDA/Gibbs functions and constants moved from gibbs.py ---
 def initialize_long_data(count_matrix: pd.DataFrame,
@@ -177,23 +163,25 @@ def compute_posterior_means_from_memmaps(A_chain_path: Path,
 def get_default_parameters():
     """Return default parameters for HLDA fitting."""
     return {
-        'n_loops': 10000,
-        'burn_in': 4000,
-        'thin': 20,
+        'n_loops': 15000,
+        'burn_in': 5000,
+        'thin': 40,
         'alpha_beta': 0.1,
         'alpha_c': 0.1
     }
 
 def main():
-    parser = argparse.ArgumentParser(description="Fit HLDA (Gibbs) to PBMC count matrix with cell type identity topics.")
+    parser = argparse.ArgumentParser(description="Fit HLDA (Gibbs) to count matrix with cell type identity topics.")
     parser.add_argument("--counts_csv", type=str, required=True, help="Path to filtered count matrix CSV (index: cell type)")
     parser.add_argument("--n_extra_topics", type=int, default=2, help="Number of extra activity topics (V1, V2, ...) (default: 2)")
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save HLDA outputs")
-    parser.add_argument("--n_loops", type=int, default=10000, help="Number of Gibbs sweeps (default: 10000)")
-    parser.add_argument("--burn_in", type=int, default=4000, help="Burn-in iterations (default: 4000)")
-    parser.add_argument("--thin", type=int, default=20, help="Thinning interval (default: 20)")
+    parser.add_argument("--n_loops", type=int, default=15000, help="Number of Gibbs sweeps (default: 15000)")
+    parser.add_argument("--burn_in", type=int, default=5000, help="Burn-in iterations (default: 5000)")
+    parser.add_argument("--thin", type=int, default=40, help="Thinning interval (default: 40)")
     parser.add_argument("--alpha_beta", type=float, default=0.1, help="Dirichlet prior for beta (default: 0.1)")
     parser.add_argument("--alpha_c", type=float, default=0.1, help="Dirichlet prior for theta (default: 0.1)")
+    parser.add_argument("--dataset", type=str, required=True, help="Dataset name (must match a key in the config file)")
+    parser.add_argument("--config_file", type=str, default="dataset_identities.yaml", help="Path to dataset identity config YAML file")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -201,32 +189,32 @@ def main():
     sample_dir = output_dir / "samples"
     sample_dir.mkdir(parents=True, exist_ok=True)
 
-    # Set up topic structure
-    n_identity = len(PBMC_CELL_TYPES)
+    # Load identity topics from config file
+    with open(args.config_file, 'r') as f:
+        config = yaml.safe_load(f)
+    if args.dataset not in config:
+        raise ValueError(f"Dataset '{args.dataset}' not found in config file {args.config_file}")
+    identity_topics = config[args.dataset]['identities']
+    n_identity = len(identity_topics)
     n_activity = args.n_extra_topics
     total_topics = n_identity + n_activity
 
     # Build topic names: identity topics + V1, V2, ...
-    identity_topics = PBMC_CELL_TYPES
     activity_topics = [f"V{i+1}" for i in range(n_activity)]
     all_topics = identity_topics + activity_topics
 
-    # Build TOPIC_STR2INT mapping dynamically based on number of activity topics
-    TOPIC_STR2INT = {}
-    # Identity topics (one per cell type)
-    for i, cell_type in enumerate(PBMC_CELL_TYPES):
-        TOPIC_STR2INT[cell_type] = i
-    # Activity topics (V1, V2, ...)
+    # Build mappings dynamically
+    IDENTITY_STR2INT = {cell_type: i for i, cell_type in enumerate(identity_topics)}
+    IDENTITY_INT2STR = {v: k for k, v in IDENTITY_STR2INT.items()}
+    TOPIC_STR2INT = {cell_type: i for i, cell_type in enumerate(identity_topics)}
     for i in range(n_activity):
         TOPIC_STR2INT[f"V{i+1}"] = n_identity + i
-
     TOPIC_INT2STR = {v: k for k, v in TOPIC_STR2INT.items()}
 
     # Create topic hierarchy: each cell type maps to its own topic + all activity topics
     topic_hierarchy_int = {
-        IDENTITY_STR2INT[cell_type]: 
-            [TOPIC_STR2INT[cell_type]] + [TOPIC_STR2INT[f"V{i+1}"] for i in range(n_activity)]
-        for cell_type in PBMC_CELL_TYPES
+        IDENTITY_STR2INT[cell_type]: [TOPIC_STR2INT[cell_type]] + [TOPIC_STR2INT[f"V{i+1}"] for i in range(n_activity)]
+        for cell_type in identity_topics
     }
 
     # Read count matrix

@@ -4,15 +4,26 @@ import pandas as pd
 from pathlib import Path
 import numpy as np
 import scipy.sparse
+import yaml
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Preprocess 10x mtx/tsv files: filter for top 1000 highly variable genes and save filtered outputs.")
-    parser.add_argument("--data_dir", type=str, required=True, help="Directory containing matrix.mtx, genes.tsv, barcodes.tsv, and 68k_pbmc_barcodes_annotation.tsv")
+    parser = argparse.ArgumentParser(description="Preprocess h5ad file for topic modeling.")
+    parser.add_argument("--input_h5ad", type=str, required=True, help="Path to input h5ad file")
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save outputs")
+    parser.add_argument("--dataset", type=str, required=True, help="Dataset name (must match a key in the config file)")
+    parser.add_argument("--config_file", type=str, default="../dataset_identities.yaml", help="Path to dataset identity config YAML file")
     args = parser.parse_args()
 
-    data_dir = Path(args.data_dir)
+    # Load identity topics from config file
+    with open(args.config_file, 'r') as f:
+        config = yaml.safe_load(f)
+    if args.dataset not in config:
+        raise ValueError(f"Dataset '{args.dataset}' not found in config file {args.config_file}")
+    identity_topics = config[args.dataset]['identities']
+    print(f"Loaded {len(identity_topics)} cell identities for dataset '{args.dataset}': {identity_topics}")
+
+    data_dir = Path(args.input_h5ad)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 

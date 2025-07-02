@@ -1,0 +1,24 @@
+pbmc:
+  identities:
+    - T cells
+    - CD19+ B
+    - CD56+ NK
+    - CD34+
+    - Dendritic
+    - CD14+ Monocyte
+
+glioma:
+  identities:
+    - B cell
+    - Dendritic cell
+    - Diff.-like
+    - Endothelial
+    - Fibroblast
+    - Granulocyte
+    - Myeloid
+    - Oligodendrocyte
+    - Pericyte
+    - Prolif. stem-like
+    - Stem-like
+    - T cell
+    # Add more as needed 

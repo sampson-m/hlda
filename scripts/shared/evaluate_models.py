@@ -15,14 +15,16 @@ from sklearn.decomposition import PCA
 from typing import Optional
 from sklearn.metrics.pairwise import cosine_similarity
 import cvxpy as cp
-from scipy.optimize import nnls
 from scipy.optimize import linear_sum_assignment
-from sklearn.manifold import TSNE
-from sklearn.metrics import silhouette_score
 import warnings
+import re
+import yaml
 warnings.filterwarnings('ignore')
 
 # Import default parameters from fit_hlda
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent))
 from fit_hlda import get_default_parameters
 
 # Get default HLDA parameters
@@ -34,16 +36,6 @@ HLDA_PARAMS.update({
     'burn_in': 5000,
     'thin': 40
 })
-
-# --- PBMC Cell Type Definitions (matching fit_hlda.py) ---
-PBMC_CELL_TYPES = [
-    'T cells',
-    'CD19+ B', 
-    'CD56+ NK',
-    'CD34+',
-    'Dendritic',
-    'CD14+ Monocyte'
-]
 
 # --- Utility functions ---
 def ensure_dir(path: Path):
@@ -283,6 +275,11 @@ def structure_plot_py(
         plt.savefig(out_png, dpi=300, bbox_inches='tight')
         plt.close(fig)
 
+try:
+    from umap import UMAP
+except ImportError:
+    UMAP = None
+
 def estimate_theta_simplex(X: np.ndarray, B, l1) -> np.ndarray:
     B = np.asarray(B)
     n, k = X.shape[0], B.shape[1]
@@ -290,43 +287,28 @@ def estimate_theta_simplex(X: np.ndarray, B, l1) -> np.ndarray:
     for i, x in enumerate(X):
         th = cp.Variable(k, nonneg=True)
         obj = cp.sum_squares(B @ th - x) + l1 * cp.sum(th)
-        prob = cp.Problem(cp.Minimize(obj), [cp.sum(th) == 1])
+        # Only cvxpy Equality objects in constraints
+        constraints = [cp.sum(th) == 1]
+        prob = cp.Problem(cp.Minimize(obj), constraints)
         prob.solve(solver=cp.OSQP, eps_abs=1e-6, verbose=False)
         Theta[i] = th.value
     return Theta
 
 def extract_top_genes_per_topic(beta_df: pd.DataFrame, n_top_genes: int = 10) -> pd.DataFrame:
-    """
-    Extract the top n genes by probability for each topic in beta.
-    
-    Args:
-        beta_df: DataFrame with genes as rows and topics as columns
-        n_top_genes: Number of top genes to extract per topic (default: 10)
-    
-    Returns:
-        DataFrame with topics as columns and top genes as rows
-    """
     top_genes_dict = {}
-    
     for topic in beta_df.columns:
         # Get the top n genes for this topic
         top_indices = beta_df[topic].nlargest(n_top_genes).index
         top_genes_dict[topic] = list(top_indices)
-    
-    # Create DataFrame with topics as columns
+    # Create DataFrame with topics as columns and gene ranks as rows
     max_genes = max(len(genes) for genes in top_genes_dict.values())
     result_data = {}
-    
     for topic, genes in top_genes_dict.items():
         # Pad with empty strings if needed
         padded_genes = genes + [''] * (max_genes - len(genes))
         result_data[topic] = padded_genes
-    
-    result_df = pd.DataFrame.from_dict(result_data, orient='index').T
-    
-    # Add row labels for gene rank
-    result_df.index = [f"Gene_{i+1}" for i in range(len(result_df))]
-    
+    result_df = pd.DataFrame(result_data, index=[f"Gene_{i+1}" for i in range(max_genes)])
+    result_df.index.name = "Gene Rank"
     return result_df
 
 def reconstruction_sse(X: np.ndarray, Theta: np.ndarray, Beta) -> float:
@@ -341,7 +323,7 @@ def incremental_sse_custom(
     activity_topics: list[str],
     theta_out: Path | None = None,
 ) -> pd.DataFrame:
-    """Incremental SSE with custom topic addition order: [id], [id,V1], [id,V2], [id,V1,V2]."""
+    """Incremental SSE with all possible activity topic combinations."""
     X_prop = X_df.div(X_df.sum(axis=1), axis=0).values
     
     # Estimate theta simplex once for all topics
@@ -357,13 +339,20 @@ def incremental_sse_custom(
         if not mask.any():
             continue
             
+        # Always start with identity-only
         topic_steps = [[ident]]
-        # Add [ident, V1], [ident, V2], [ident, V1, V2] (if present)
-        if len(activity_topics) >= 1:
-            topic_steps.append([ident, activity_topics[0]])
-        if len(activity_topics) >= 2:
-            topic_steps.append([ident, activity_topics[1]])
-            topic_steps.append([ident, activity_topics[0], activity_topics[1]])
+        
+        # Generate all possible combinations of activity topics
+        from itertools import combinations
+        
+        # Add individual activity topics
+        for activity_topic in activity_topics:
+            topic_steps.append([ident, activity_topic])
+        
+        # Add all combinations of 2 or more activity topics
+        for r in range(2, len(activity_topics) + 1):
+            for combo in combinations(activity_topics, r):
+                topic_steps.append([ident] + list(combo))
             
         for topics_now in topic_steps:
             # Only use topics that exist in beta_df
@@ -378,8 +367,14 @@ def incremental_sse_custom(
             # Calculate SSE using the subset
             sse = reconstruction_sse(X_prop[mask], Theta_subset, B_subset)
             
+            # Create topic combination label
+            if len(topics_now) == 1 and topics_now[0] == ident:
+                topic_label = f"{ident}_only"
+            else:
+                topic_label = "+".join(topics_now)
+            
             results.append({
-                "topics": "+".join(topics_now),
+                "topics": topic_label,
                 "identity": ident,
                 "cells": int(mask.sum()),
                 "SSE": sse,
@@ -469,11 +464,8 @@ def prepare_model_topics(model_name: str, beta: pd.DataFrame, theta: pd.DataFram
     elif model_name in ["LDA", "NMF"]:
         # Create true beta matrix for matching
         true_beta = create_true_beta_from_counts(counts_df, identity_topics)
-        
-        # Match topics to identities
         topic_mapping = match_topics_to_identities(beta, true_beta, identity_topics, n_extra_topics)
         
-        # Rename beta and theta columns using the mapping
         beta_renamed = beta.rename(columns=topic_mapping)
         theta_renamed = theta.rename(columns=topic_mapping)
         
@@ -484,28 +476,15 @@ def prepare_model_topics(model_name: str, beta: pd.DataFrame, theta: pd.DataFram
 
 def plot_true_vs_estimated_similarity(true_beta: pd.DataFrame, estimated_beta: pd.DataFrame, 
                                     model_name: str, out_png: Path):
-    """
-    Plot cosine similarity heatmap between true averaged gene expression profiles 
-    and estimated beta topics.
-    
-    Args:
-        true_beta: DataFrame with true averaged expression profiles (genes x identities)
-        estimated_beta: DataFrame with estimated topic distributions (genes x topics)
-        model_name: Name of the model for the plot title
-        out_png: Output path for the plot
-    """
-    # Compute cosine similarity between true and estimated profiles
-    # Normalize for cosine similarity
+
     true_norms = np.linalg.norm(true_beta.values, axis=0, keepdims=True)
     est_norms = np.linalg.norm(estimated_beta.values, axis=0, keepdims=True)
     
     true_normalized = true_beta.values / (true_norms + 1e-12)
     est_normalized = estimated_beta.values / (est_norms + 1e-12)
     
-    # Compute similarity matrix: true identities (rows) x estimated topics (columns)
     similarity = true_normalized.T @ est_normalized  # shape: (n_identities, n_topics)
     
-    # Create DataFrame for easier plotting
     sim_df = pd.DataFrame(
         similarity,
         index=true_beta.columns,  # True identities
@@ -531,120 +510,54 @@ def plot_true_vs_estimated_similarity(true_beta: pd.DataFrame, estimated_beta: p
     sim_df.to_csv(sim_csv)
 
 def plot_true_self_similarity(true_beta: pd.DataFrame, out_png: Path):
-    """
-    Plot cosine similarity heatmap between true averaged gene expression profiles 
-    against themselves (self-similarity matrix).
-    
-    Args:
-        true_beta: DataFrame with true averaged expression profiles (genes x identities)
-        out_png: Output path for the plot
-    """
-    # Compute cosine similarity between true profiles and themselves
-    # Normalize for cosine similarity
     true_norms = np.linalg.norm(true_beta.values, axis=0, keepdims=True)
     true_normalized = true_beta.values / (true_norms + 1e-12)
-    
-    # Compute self-similarity matrix: true identities (rows) x true identities (columns)
-    similarity = true_normalized.T @ true_normalized  # shape: (n_identities, n_identities)
-    
-    # Create DataFrame for easier plotting
+    similarity = true_normalized.T @ true_normalized
     sim_df = pd.DataFrame(
         similarity,
-        index=true_beta.columns,  # True identities
-        columns=true_beta.columns  # True identities
+        index=true_beta.columns,
+        columns=true_beta.columns
     )
-    
-    # Create the plot
     plt.figure(figsize=(8, 6))
-    sns.heatmap(sim_df, annot=True, fmt=".3f", cmap="viridis", 
-                cbar_kws={'label': 'Cosine Similarity'})
+    sns.heatmap(sim_df, annot=True, fmt=".3f", cmap="viridis", cbar_kws={'label': 'Cosine Similarity'})
     plt.title("True Identity Self-Similarity\nAveraged Gene Expression Profiles")
     plt.xlabel("True Cell Type Identities")
     plt.ylabel("True Cell Type Identities")
     plt.tight_layout()
-    
-    # Save the plot
     ensure_dir(out_png.parent)
     plt.savefig(out_png, dpi=300, bbox_inches='tight')
     plt.close()
-    
-    # Also save the similarity matrix as CSV
-    sim_csv = out_png.with_suffix('.csv')
-    sim_df.to_csv(sim_csv)
-    
-    # Print summary statistics
-    print(f"True identity self-similarity summary:")
-    print(f"  Mean similarity: {sim_df.values.mean():.3f}")
-    print(f"  Min similarity: {sim_df.values.min():.3f}")
-    print(f"  Max similarity: {sim_df.values.max():.3f}")
 
-def compute_perplexity_and_loglikelihood(X_test: np.ndarray, beta: np.ndarray, theta: np.ndarray) -> tuple[float, float]:
-    """
-    Compute perplexity and log-likelihood on test data.
-    
-    Args:
-        X_test: Test count matrix (cells x genes)
-        beta: Topic-gene distributions (genes x topics)
-        theta: Cell-topic distributions (cells x topics)
-    
-    Returns:
-        tuple: (perplexity, log_likelihood)
-    """
-    # Convert to numpy arrays if they're pandas DataFrames
-    if isinstance(X_test, pd.DataFrame):
-        X_test = X_test.values
+def compute_loglikelihood(X: np.ndarray, beta: np.ndarray, theta: np.ndarray) -> float:
+
+    if isinstance(X, pd.DataFrame):
+        X = X.values
     if isinstance(beta, pd.DataFrame):
         beta = beta.values
     if isinstance(theta, pd.DataFrame):
         theta = theta.values
     
-    # Convert to proportions
-    X_prop = X_test / (X_test.sum(axis=1, keepdims=True) + 1e-12)
-    
-    # Compute reconstruction: theta @ beta.T
+    X_prop = X / (X.sum(axis=1, keepdims=True) + 1e-12)
     recon = theta @ beta.T
-    
-    # Normalize reconstruction
     recon = recon / (recon.sum(axis=1, keepdims=True) + 1e-12)
     
-    # Add small epsilon to avoid log(0)
     eps = 1e-12
     recon = np.clip(recon, eps, 1 - eps)
-    
-    # Compute log-likelihood
     log_likelihood = np.sum(X_prop * np.log(recon))
     
-    # Compute perplexity
-    n_tokens = X_test.sum()
-    perplexity = np.exp(-log_likelihood / n_tokens)
-    
-    return perplexity, log_likelihood
+    return log_likelihood
 
 def plot_umap_theta(theta: pd.DataFrame, cell_identities: pd.Series, model_name: str, out_png: Path):
-    """
-    Create UMAP visualization of theta matrix colored by cell type.
-    
-    Args:
-        theta: Cell-topic proportions (cells x topics)
-        cell_identities: Cell type identities
-        model_name: Name of the model
-        out_png: Output path for the plot
-    """
-    # Fit UMAP
-    try:
-        from umap import UMAP
-        umap_reducer = UMAP(random_state=42, n_neighbors=15, min_dist=0.1)
-        theta_2d = umap_reducer.fit_transform(theta.values)
-    except ImportError:
+    if UMAP is None:
         print(f"  UMAP not available for {model_name}, skipping UMAP plot")
         return
+    umap_reducer = UMAP(random_state=42, n_neighbors=15, min_dist=0.1)
+    theta_2d = umap_reducer.fit_transform(theta.values)
     
-    # Create color mapping
     unique_cell_types = sorted(cell_identities.unique())
     colors = sns.color_palette("husl", n_colors=len(unique_cell_types))
     color_map = dict(zip(unique_cell_types, colors))
     
-    # Create plot
     fig, ax = plt.subplots(figsize=(10, 8))
     
     for cell_type in unique_cell_types:
@@ -659,22 +572,16 @@ def plot_umap_theta(theta: pd.DataFrame, cell_identities: pd.Series, model_name:
     ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
     
-    # Save plot
     ensure_dir(out_png.parent)
     plt.savefig(out_png, dpi=300, bbox_inches='tight')
     plt.close()
 
 def plot_umap_activity(theta: pd.DataFrame, activity_topics: list, model_name: str, out_png: Path):
-    """
-    Create UMAP visualization of theta matrix colored by activity topic usage (sum of V1, V2, V3).
-    """
-    try:
-        from umap import UMAP
-        umap_reducer = UMAP(random_state=42, n_neighbors=15, min_dist=0.1)
-        theta_2d = umap_reducer.fit_transform(theta.values)
-    except ImportError:
+    if UMAP is None:
         print(f"  UMAP not available for {model_name}, skipping activity UMAP plot")
         return
+    umap_reducer = UMAP(random_state=42, n_neighbors=15, min_dist=0.1)
+    theta_2d = umap_reducer.fit_transform(theta.values)
     # Compute activity usage
     activity_cols = [col for col in theta.columns if col in activity_topics]
     if not activity_cols:
@@ -693,203 +600,93 @@ def plot_umap_activity(theta: pd.DataFrame, activity_topics: list, model_name: s
     plt.savefig(out_png, dpi=300, bbox_inches='tight')
     plt.close()
 
-def compare_activity_topic_genes(models: dict, activity_topics: list[str], out_dir: Path, n_top_genes: int = 20):
-    """
-    Compare top genes across activity topics (V1, V2, V3, etc.) between models.
+def get_num_activity_topics(topic_str, identity):
+    # Count how many V's are in the topic string (excluding the identity itself)
+    return len(re.findall(r'V\d+', topic_str))
+
+def plot_combined_identity_sse_heatmap(sse_df, output_dir):
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    import re
+    from pathlib import Path
     
-    Args:
-        models: Dictionary of model data with 'beta' DataFrames
-        activity_topics: List of activity topic names (e.g., ['V1', 'V2', 'V3'])
-        out_dir: Output directory for plots and CSV files
-        n_top_genes: Number of top genes to compare per topic
-    """
-    # Create output directory
-    plots_dir = out_dir / "plots"
-    plots_dir.mkdir(parents=True, exist_ok=True)
+    # Only keep rows where the topic string starts with the identity
+    sse_df = sse_df[sse_df.apply(lambda row: row['topics'].startswith(row['identity']), axis=1)]
     
-    # Extract top genes for each activity topic in each model
-    activity_genes = {}
-    for model_name, model_data in models.items():
-        beta = model_data["beta"]
-        activity_genes[model_name] = {}
-        
-        for topic in activity_topics:
-            if topic in beta.columns:
-                top_genes = beta[topic].nlargest(n_top_genes).index.tolist()
-                activity_genes[model_name][topic] = top_genes
+    # Create row label for identity and model
+    sse_df['identity_model'] = sse_df['identity'] + ' | ' + sse_df['model']
     
-    # Create comparison plots for each activity topic
-    for topic in activity_topics:
-        # Check if this topic exists in any model
-        topic_models = {model: genes.get(topic, []) for model, genes in activity_genes.items()}
-        if not any(topic_models.values()):
+    # Extract the activity part from the topic string to use as column names
+    def extract_activity_part(topic_str, identity):
+        # Remove the identity part and "_only" suffix
+        activity_part = topic_str.replace(identity, "").replace("_only", "")
+        # Clean up any leading/trailing + signs
+        activity_part = activity_part.strip("+")
+        if activity_part == "":
+            return "identity_only"
+        else:
+            return "+" + activity_part
+    
+    sse_df['activity_combo'] = sse_df.apply(lambda row: extract_activity_part(row['topics'], row['identity']), axis=1)
+    
+    # Sort by identity then model for grouping
+    sse_df = sse_df.sort_values(['identity', 'model'])
+    
+    # Create pivot table with activity combinations as columns
+    pivot = sse_df.pivot_table(index='identity_model', columns='activity_combo', values='SSE', aggfunc='first')
+    
+    # Reorder columns to have a logical progression
+    column_order = ['identity_only']
+    # Add +V1, +V2, +V3, etc. in order
+    for i in range(1, 10):  # Support up to 9 activity topics
+        v_col = f'+V{i}'
+        if v_col in pivot.columns:
+            column_order.append(v_col)
+    # Add combinations like +V1+V2, +V1+V3, etc.
+    for col in sorted(pivot.columns):
+        if col not in column_order and col.startswith('+V'):
+            column_order.append(col)
+    
+    # Reorder the columns
+    pivot = pivot[column_order]
+    
+    # Plot
+    plt.figure(figsize=(12, max(8, 0.4 * len(pivot))))
+    ax = sns.heatmap(pivot, annot=True, fmt='.2f', cmap='viridis_r', linewidths=0.5, linecolor='white')
+    plt.title('SSE by Cell Identity, Model, and Activity Topic Combinations')
+    plt.xlabel('Activity Topic Combinations')
+    plt.ylabel('Cell Identity | Model')
+    
+    # Add red border to the single lowest SSE for each identity
+    for identity in sse_df['identity'].unique():
+        sub = sse_df[sse_df['identity'] == identity]
+        if sub.empty:
             continue
-            
-        # Create Venn diagram or heatmap showing gene overlap
-        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-        
-        # Plot 1: Gene overlap heatmap
-        model_names = list(topic_models.keys())
-        overlap_matrix = np.zeros((len(model_names), len(model_names)))
-        
-        for i, model1 in enumerate(model_names):
-            for j, model2 in enumerate(model_names):
-                genes1 = set(topic_models[model1])
-                genes2 = set(topic_models[model2])
-                if len(genes1) > 0 and len(genes2) > 0:
-                    overlap = len(genes1.intersection(genes2))
-                    overlap_matrix[i, j] = overlap
-        
-        # Create heatmap
-        sns.heatmap(overlap_matrix, annot=True, fmt='d', cmap='Blues', 
-                   xticklabels=model_names, yticklabels=model_names, ax=axes[0])
-        axes[0].set_title(f'Gene Overlap Matrix for {topic}\n(Number of shared genes)')
-        axes[0].set_xlabel('Models')
-        axes[0].set_ylabel('Models')
-        
-        # Plot 2: Top genes comparison table
-        axes[1].axis('off')
-        
-        # Create a table showing top genes for each model
-        max_genes = max(len(genes) for genes in topic_models.values())
-        table_data = []
-        for model in model_names:
-            genes = topic_models[model]
-            # Pad with empty strings
-            padded_genes = genes + [''] * (max_genes - len(genes))
-            table_data.append([model] + padded_genes)
-        
-        # Create table
-        col_labels = ['Model'] + [f'Gene_{i+1}' for i in range(max_genes)]
-        table = axes[1].table(cellText=table_data, colLabels=col_labels, 
-                             cellLoc='left', loc='center')
-        table.auto_set_font_size(False)
-        table.set_fontsize(9)
-        table.scale(1, 2)
-        
-        # Color code cells based on gene overlap
-        for i, model1 in enumerate(model_names):
-            genes1 = set(topic_models[model1])
-            for j in range(1, len(col_labels)):  # Skip model name column
-                if j-1 < len(topic_models[model1]):
-                    gene = topic_models[model1][j-1]
-                    # Check if this gene appears in other models
-                    shared_count = sum(1 for model2 in model_names 
-                                     if gene in set(topic_models[model2]))
-                    if shared_count > 1:
-                        # Color based on how many models share this gene
-                        color_intensity = min(0.9, 0.3 + 0.2 * shared_count)
-                        table[(i+1, j)].set_facecolor(f'lightblue')
-        
-        axes[1].set_title(f'Top {n_top_genes} Genes for {topic} Across Models\n(Shared genes highlighted)')
-        
-        plt.tight_layout()
-        plt.savefig(plots_dir / f'activity_topic_{topic}_gene_comparison.png', 
-                   dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        # Save detailed comparison as CSV
-        comparison_data = []
-        for model in model_names:
-            genes = topic_models[model]
-            for rank, gene in enumerate(genes, 1):
-                # Check which other models have this gene
-                shared_with = []
-                for other_model in model_names:
-                    if other_model != model and gene in set(topic_models[other_model]):
-                        shared_with.append(other_model)
-                
-                comparison_data.append({
-                    'model': model,
-                    'topic': topic,
-                    'gene': gene,
-                    'rank': rank,
-                    'shared_with': ', '.join(shared_with) if shared_with else 'None',
-                    'shared_count': len(shared_with)
-                })
-        
-        comparison_df = pd.DataFrame(comparison_data)
-        comparison_df.to_csv(plots_dir / f'activity_topic_{topic}_gene_comparison.csv', index=False)
+        min_idx = sub['SSE'].idxmin()
+        min_activity = sub.loc[min_idx, 'activity_combo']
+        min_model = sub.loc[min_idx, 'model']
+        row_label = f'{identity} | {min_model}'
+        if row_label in pivot.index and min_activity in pivot.columns:
+            row_idx = list(pivot.index).index(row_label)
+            col_idx = list(pivot.columns).index(min_activity)
+            from matplotlib.patches import Rectangle
+            ax.add_patch(Rectangle((col_idx, row_idx), 1, 1, fill=False, edgecolor='red', linewidth=3))
     
-    # Create overall summary statistics
-    summary_data = []
-    for topic in activity_topics:
-        topic_models = {model: genes.get(topic, []) for model, genes in activity_genes.items()}
-        if not any(topic_models.values()):
-            continue
-            
-        # Calculate overlap statistics
-        all_genes = set()
-        for genes in topic_models.values():
-            all_genes.update(genes)
-        
-        # Count how many models each gene appears in
-        gene_counts = {}
-        for gene in all_genes:
-            count = sum(1 for genes in topic_models.values() if gene in genes)
-            gene_counts[gene] = count
-        
-        # Summary statistics
-        total_unique_genes = len(all_genes)
-        shared_genes = sum(1 for count in gene_counts.values() if count > 1)
-        avg_models_per_gene = sum(gene_counts.values()) / len(gene_counts) if gene_counts else 0
-        
-        summary_data.append({
-            'topic': topic,
-            'total_unique_genes': total_unique_genes,
-            'shared_genes': shared_genes,
-            'shared_percentage': (shared_genes / total_unique_genes * 100) if total_unique_genes > 0 else 0,
-            'avg_models_per_gene': avg_models_per_gene
-        })
-    
-    summary_df = pd.DataFrame(summary_data)
-    summary_df.to_csv(plots_dir / 'activity_topic_gene_summary.csv', index=False)
-    
-    # Create summary plot
-    if summary_data:
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-        
-        # Plot 1: Shared vs unique genes
-        topics = [d['topic'] for d in summary_data]
-        shared = [d['shared_genes'] for d in summary_data]
-        unique = [d['total_unique_genes'] - d['shared_genes'] for d in summary_data]
-        
-        x = np.arange(len(topics))
-        width = 0.35
-        
-        axes[0].bar(x - width/2, shared, width, label='Shared Genes', color='lightblue')
-        axes[0].bar(x + width/2, unique, width, label='Unique Genes', color='lightcoral')
-        
-        axes[0].set_xlabel('Activity Topics')
-        axes[0].set_ylabel('Number of Genes')
-        axes[0].set_title('Gene Sharing Across Models by Activity Topic')
-        axes[0].set_xticks(x)
-        axes[0].set_xticklabels(topics)
-        axes[0].legend()
-        
-        # Plot 2: Average models per gene
-        avg_models = [d['avg_models_per_gene'] for d in summary_data]
-        axes[1].bar(topics, avg_models, color='skyblue')
-        axes[1].set_xlabel('Activity Topics')
-        axes[1].set_ylabel('Average Models per Gene')
-        axes[1].set_title('Gene Conservation Across Models')
-        axes[1].tick_params(axis='x', rotation=45)
-        
-        plt.tight_layout()
-        plt.savefig(plots_dir / 'activity_topic_gene_summary_plots.png', 
-                   dpi=300, bbox_inches='tight')
-        plt.close()
-    
-    print(f"Activity topic gene comparison saved to {plots_dir}")
-    return activity_genes
+    plt.tight_layout()
+    # Ensure output directory exists
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_dir / 'sse_heatmap_combined.png', dpi=300, bbox_inches='tight')
+    plt.close()
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate topic models (HLDA, LDA, NMF) and run metrics/plots.")
     parser.add_argument("--counts_csv", type=str, required=True, help="Path to filtered count matrix CSV")
     parser.add_argument("--test_csv", type=str, required=True, help="Path to test count matrix CSV")
     parser.add_argument("--output_dir", type=str, required=True, help="Directory with model outputs and for saving plots/metrics")
-    parser.add_argument("--identity_topics", type=str, required=True, help="Comma-separated list of identity topic names (e.g. 'A,B,C,D')")
     parser.add_argument("--n_extra_topics", type=int, required=True, help="Number of extra topics (e.g. 3 for V1,V2,V3)")
+    parser.add_argument("--dataset", type=str, required=True, help="Dataset name (must match a key in the config file)")
+    parser.add_argument("--config_file", type=str, default="dataset_identities.yaml", help="Path to dataset identity config YAML file")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -917,8 +714,14 @@ def main():
             models[m] = {"beta": beta, "theta": theta}
     print(f"Models loaded: {list(models.keys())}")
     
+    # Load identity topics from config file
+    with open(args.config_file, 'r') as f:
+        config = yaml.safe_load(f)
+    if args.dataset not in config:
+        raise ValueError(f"Dataset '{args.dataset}' not found in config file {args.config_file}")
+    identity_topics = config[args.dataset]['identities']
+    
     # Parse identity topics and extra topics from command line arguments
-    identity_topics = args.identity_topics.split(',')
     extra_topics = [f"V{i+1}" for i in range(args.n_extra_topics)]
     
     # Prepare topics for each model (match and label appropriately)
@@ -1131,33 +934,29 @@ def main():
     common_plots_dir.mkdir(parents=True, exist_ok=True)
     out_png = common_plots_dir / "true_identity_self_similarity.png"
     plot_true_self_similarity(true_beta, out_png)
-    
-    # Save expression averaged topics (true beta) as CSV
-    true_beta.to_csv(common_plots_dir / "expression_averaged_topics.csv")
-    
-    # NOTE: SSE evaluation is currently disabled due to missing dependencies (holdout_test_set, identity_topics, extra_topics)
-    
-    # Print bash command for eas
 
-    # 10) Compute perplexity and log-likelihood, and save metrics
-    print("Computing perplexity and log-likelihood...")
+    # 10) Compute log-likelihood on both train and test datasets, and save metrics
+    print("Computing log-likelihood on train and test datasets...")
     metrics = []
     for m, d in models.items():
         model_plots_dir = output_dir / m / "plots"
         model_plots_dir.mkdir(parents=True, exist_ok=True)
         beta = d["beta"]
         theta = d["theta"]
-        X_test = test_df.values
-        # Estimate theta for test data using the learned beta
+        
+        # Compute log-likelihood on train data (using learned theta)
+        X_train_prop = counts_df.div(counts_df.sum(axis=1), axis=0).values
+        train_log_likelihood = compute_loglikelihood(X_train_prop, beta.values, theta.values)
+        
+        # Compute log-likelihood on test data (estimate theta for test data)
         X_test_prop = test_df.div(test_df.sum(axis=1), axis=0).values
         theta_test = estimate_theta_simplex(X_test_prop, beta.values, l1=0.002)
-        perplexity, log_likelihood = compute_perplexity_and_loglikelihood(X_test, beta.values, theta_test)
-        print(f"{m} perplexity: {perplexity}")
-        print(f"{m} log-likelihood: {log_likelihood}")
+        test_log_likelihood = compute_loglikelihood(X_test_prop, beta.values, theta_test)
+        
         metrics.append({
             "model": m,
-            "perplexity": perplexity,
-            "log_likelihood": log_likelihood
+            "train_log_likelihood": train_log_likelihood,
+            "test_log_likelihood": test_log_likelihood
         })
     # Save metrics summary
     metrics_df = pd.DataFrame(metrics)
@@ -1177,13 +976,10 @@ def main():
         out_png_activity = model_plots_dir / f"{m}_umap_activity.png"
         plot_umap_activity(theta, activity_topics, m, out_png_activity)
 
-    # 12) Compare activity topic genes
-    print("Comparing activity topic genes...")
-    compare_activity_topic_genes(models, activity_topics, out_dir=output_dir, n_top_genes=20)
-
-    # 13) Remove scanpy comparison
-    # (code removed)
+    # 14) Plot SSE heatmap
+    plot_combined_identity_sse_heatmap(combined_sse_df, output_dir / 'plots')
 
 if __name__ == "__main__":
     main() 
+
 
