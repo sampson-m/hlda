@@ -12,6 +12,8 @@ from pathlib import Path
 import warnings
 import re
 import argparse
+import glob
+import yaml
 warnings.filterwarnings('ignore')
 
 def load_metrics_from_fits(base_dir: Path, topic_configs: list) -> pd.DataFrame:
@@ -392,17 +394,103 @@ def create_comprehensive_sse_analysis(sse_df: pd.DataFrame, output_dir: Path):
         'comprehensive_pivot': pivot_df
     }
 
+def get_topic_mapping_from_model_dir(model_dir, identity_topics, n_extra_topics):
+    """
+    Load the topic mapping from the columns of the theta or beta CSVs in the model output directory.
+    Returns the topic order as used in the structure plot.
+    """
+    # Try HLDA, LDA, NMF in order
+    for model in ["HLDA", "LDA", "NMF"]:
+        theta_path = Path(model_dir) / model / f"{model}_theta.csv"
+        if theta_path.exists():
+            theta_df = pd.read_csv(theta_path, index_col=0)
+            topic_order = list(theta_df.columns)
+            # HLDA: topics are already labeled
+            if model == "HLDA":
+                return topic_order
+            # LDA/NMF: topics are mapped in the CSVs
+            # Try to match to config order (identities + activities)
+            # If not, just use the order in the CSV
+            return topic_order
+    # Fallback: use identity_topics + activity topics
+    activity_topics = [f"V{i+1}" for i in range(n_extra_topics)]
+    return identity_topics + activity_topics
+
+def plot_combined_cumulative_sse_lineplot(base_dir, identity_topics, max_n_activity, plot_dir, config_file):
+    """
+    Aggregate all sse_summary.csv files from each model configuration, extract cumulative SSE, and plot combined line plot.
+    Each line: (model, n_activity_topics). X: topic names (structure plot order), Y: cumulative SSE.
+    """
+    # Load config for identity topics (for robust mapping)
+    with open(config_file, 'r') as f:
+        config = yaml.safe_load(f)
+    # Find all sse_summary.csv files in subdirectories
+    sse_files = glob.glob(str(Path(base_dir) / "*_*_fit" / "sse_summary.csv"))
+    all_results = []
+    for sse_file in sse_files:
+        # Infer n_activity_topics from directory name
+        config_dir = Path(sse_file).parent
+        config_name = config_dir.name
+        try:
+            n_activity = int(config_name.split('_')[0]) - len(identity_topics)
+        except Exception:
+            n_activity = None
+        # Read sse_summary.csv
+        df = pd.read_csv(sse_file)
+        # Get topic order from model output (structure plot order)
+        topic_order = get_topic_mapping_from_model_dir(config_dir, identity_topics, n_activity)
+        models = df['model'].unique()
+        for model in models:
+            model_df = df[df['model'] == model]
+            sse_vals = []
+            x_labels = []
+            for i in range(1, len(topic_order)+1):
+                topics_now = topic_order[:i]
+                if len(topics_now) == 1:
+                    topic_label = f"{topics_now[0]}_only"
+                else:
+                    topic_label = '+'.join(topics_now)
+                row = model_df[model_df['topics'] == topic_label]
+                if not row.empty:
+                    sse_vals.append(row['SSE'].values[0])
+                else:
+                    sse_vals.append(float('nan'))
+                x_labels.append(topics_now[-1])
+            all_results.append({
+                'model': model,
+                'n_activity': n_activity,
+                'sse_vals': sse_vals,
+                'x_labels': x_labels,
+                'config': config_name
+            })
+    # Plot
+    plt.figure(figsize=(max(8, (len(identity_topics)+max_n_activity)*1.2), 6))
+    for res in all_results:
+        label = f"{res['model']} ({res['n_activity']} activity)"
+        plt.plot(res['x_labels'], res['sse_vals'], marker='o', label=label)
+    plt.xlabel('Topic added (structure plot order)')
+    plt.ylabel('Cumulative SSE (test set)')
+    plt.title('Combined Cumulative SSE as topics are added')
+    plt.xticks(rotation=45, ha='right')
+    plt.legend(title='Model/config', bbox_to_anchor=(1.01, 1), loc='upper left')
+    plt.tight_layout()
+    Path(plot_dir).mkdir(parents=True, exist_ok=True)
+    plt.savefig(Path(plot_dir) / 'combined_cumulative_sse_by_topic.png', dpi=200)
+    plt.close()
+
 def main():
     """Main function to run the comprehensive analysis."""
     parser = argparse.ArgumentParser(description="Comprehensive analysis for HLDA, LDA, NMF fits.")
     parser.add_argument('--base_dir', type=str, default="estimates/pbmc/heldout_1500", help='Base directory containing topic fit folders (e.g., estimates/pbmc/heldout_1500)')
     parser.add_argument('--output_dir', type=str, default=None, help='Directory for outputs (default: <base_dir>/model_comparison)')
     parser.add_argument('--topic_configs', type=str, default='7,8,9', help='Comma-separated list of topic counts (default: 7,8,9)')
+    parser.add_argument('--config_file', type=str, default="dataset_identities.yaml", help='Path to dataset identity config YAML file')
     args = parser.parse_args()
 
     base_dir = Path(args.base_dir)
     topic_configs = [f'{n.strip()}_topic_fit' for n in args.topic_configs.split(',')]
     output_dir = Path(args.output_dir) if args.output_dir else base_dir / "model_comparison"
+    config_file = args.config_file
 
     print("Loading metrics from all topic configurations...")
     metrics_df = load_metrics_from_fits(base_dir, topic_configs)
@@ -422,6 +510,31 @@ def main():
         train_loglik_pivot, test_loglik_pivot = create_metrics_matrix_output(metrics_df, output_dir)
     print("Creating comprehensive SSE analysis...")
     sse_analysis = create_comprehensive_sse_analysis(sse_df, output_dir)
+
+    # Load identity topics from config file
+    with open(config_file, 'r') as f:
+        config = yaml.safe_load(f)
+    # Try to infer dataset from base_dir name
+    dataset_guess = None
+    for ds in config.keys():
+        if ds in base_dir:
+            dataset_guess = ds
+            break
+    if dataset_guess is None:
+        dataset_guess = list(config.keys())[0]
+    identity_topics = config[dataset_guess]['identities']
+    # Find max_n_activity from subdirs
+    subdirs = [d for d in Path(base_dir).iterdir() if d.is_dir() and '_fit' in d.name]
+    max_n_activity = 0
+    for d in subdirs:
+        try:
+            n_activity = int(d.name.split('_')[0]) - len(identity_topics)
+            if n_activity > max_n_activity:
+                max_n_activity = n_activity
+        except Exception:
+            continue
+    plot_dir = Path(output_dir)
+    plot_combined_cumulative_sse_lineplot(base_dir, identity_topics, max_n_activity, plot_dir, config_file)
 
 if __name__ == "__main__":
     main() 

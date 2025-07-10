@@ -145,7 +145,7 @@ if [ "$DATASET" = "pbmc" ]; then
         $SKIP_HLDA $SKIP_LDA_NMF $SKIP_EVALUATION
 
 elif [ "$DATASET" = "glioma" ]; then
-    TOPIC_CONFIGS="13,14,15,16"
+    TOPIC_CONFIGS="16"
     BASE_OUTPUT_DIR="estimates/glioma"
     CONFIG_FILE="dataset_identities.yaml"
     
