@@ -54,7 +54,7 @@ def load_metrics_from_fits(base_dir: Path, topic_configs: list) -> pd.DataFrame:
 def load_sse_from_fits(base_dir: Path, topic_configs: list) -> pd.DataFrame:
     """
     Load all SSE results from different topic configurations.
-    Loads from individual model folders within each topic configuration.
+    Loads from sse_summary.csv files at the topic configuration level.
     
     Args:
         base_dir: Base directory containing topic fit folders
@@ -64,27 +64,24 @@ def load_sse_from_fits(base_dir: Path, topic_configs: list) -> pd.DataFrame:
         DataFrame with all SSE results combined
     """
     all_sse = []
-    models = ["HLDA", "LDA", "NMF"]
     
     for config in topic_configs:
         config_dir = base_dir / config
-        n_extra_topics = int(config.split('_')[0]) - 6  # 7->1, 8->2, 9->3
+        # Look for the consolidated SSE file at the config level
+        sse_file = config_dir / "sse_summary.csv"
         
-        for model in models:
-            model_dir = config_dir / model
-            sse_file = model_dir / "plots" / f"{model}_test_sse.csv"
+        if sse_file.exists():
+            sse_df = pd.read_csv(sse_file)
+            # Add metadata columns
+            n_extra_topics = int(config.split('_')[0]) - 6  # 7->1, 8->2, 9->3
+            sse_df['n_extra_topics'] = n_extra_topics
+            sse_df['topic_config'] = config
+            sse_df['model_fit_topics'] = int(config.split('_')[0])  # 7, 8, or 9
+            all_sse.append(sse_df)
             
-            if sse_file.exists():
-                sse_df = pd.read_csv(sse_file)
-                sse_df['model'] = model
-                sse_df['n_extra_topics'] = n_extra_topics
-                sse_df['topic_config'] = config
-                sse_df['model_fit_topics'] = int(config.split('_')[0])  # 7, 8, or 9
-                all_sse.append(sse_df)
-                
-                print(f"Loaded SSE from {config}/{model}: {len(sse_df)} rows")
-            else:
-                print(f"Warning: No SSE file found in {config}/{model}")
+            print(f"Loaded SSE from {config}: {len(sse_df)} rows ({sse_df['model'].nunique()} models)")
+        else:
+            print(f"Warning: No sse_summary.csv found in {config}")
     
     if all_sse:
         combined_sse = pd.concat(all_sse, ignore_index=True)
@@ -418,65 +415,199 @@ def get_topic_mapping_from_model_dir(model_dir, identity_topics, n_extra_topics)
 
 def plot_combined_cumulative_sse_lineplot(base_dir, identity_topics, max_n_activity, plot_dir, config_file):
     """
-    Aggregate all sse_summary.csv files from each model configuration, extract cumulative SSE, and plot combined line plot.
-    Each line: (model, n_activity_topics). X: topic names (structure plot order), Y: cumulative SSE.
+    Create a comprehensive line plot comparing SSE across different model configurations.
+    
+    - Colors: Different for each model type (HLDA, LDA, NMF)
+    - Line styles: Different for each topic configuration (7, 8, 9 topics)
+    - X-axis: Descriptive activity topic combinations ("Identity only", "Identity + V1", etc.)
+    - Y-axis: Total SSE summed across all cell types
+    - Missing data: Lines stop where data is unavailable
+    
+    Args:
+        base_dir: Base directory containing topic fit folders
+        identity_topics: List of identity topic names
+        max_n_activity: Maximum number of activity topics
+        plot_dir: Output directory for plots
+        config_file: Path to dataset configuration file
     """
-    # Load config for identity topics (for robust mapping)
-    with open(config_file, 'r') as f:
-        config = yaml.safe_load(f)
-    # Find all sse_summary.csv files in subdirectories
-    sse_files = glob.glob(str(Path(base_dir) / "*_*_fit" / "sse_summary.csv"))
-    all_results = []
-    for sse_file in sse_files:
-        # Infer n_activity_topics from directory name
-        config_dir = Path(sse_file).parent
-        config_name = config_dir.name
-        try:
-            n_activity = int(config_name.split('_')[0]) - len(identity_topics)
-        except Exception:
-            n_activity = None
-        # Read sse_summary.csv
-        df = pd.read_csv(sse_file)
-        # Get topic order from model output (structure plot order)
-        topic_order = get_topic_mapping_from_model_dir(config_dir, identity_topics, n_activity)
-        models = df['model'].unique()
-        for model in models:
-            model_df = df[df['model'] == model]
-            sse_vals = []
-            x_labels = []
-            for i in range(1, len(topic_order)+1):
-                topics_now = topic_order[:i]
-                if len(topics_now) == 1:
-                    topic_label = f"{topics_now[0]}_only"
+    # Load all SSE data from different topic configurations
+    topic_configs = []
+    for dir_path in Path(base_dir).iterdir():
+        if dir_path.is_dir() and '_topic_fit' in dir_path.name:
+            try:
+                n_total_topics = int(dir_path.name.split('_')[0])
+                n_activity = n_total_topics - len(identity_topics)
+                if n_activity >= 0:
+                    topic_configs.append({
+                        'name': dir_path.name,
+                        'path': dir_path,
+                        'n_total_topics': n_total_topics,
+                        'n_activity': n_activity
+                    })
+            except (ValueError, IndexError):
+                continue
+    
+    if not topic_configs:
+        print("No valid topic configuration directories found")
+        return
+    
+    # Load SSE data from each configuration
+    all_sse_data = []
+    for config in topic_configs:
+        sse_file = config['path'] / 'sse_summary.csv'
+        if sse_file.exists():
+            sse_df = pd.read_csv(sse_file)
+            sse_df['topic_config'] = config['name']
+            sse_df['n_total_topics'] = config['n_total_topics']
+            sse_df['n_activity'] = config['n_activity']
+            all_sse_data.append(sse_df)
+    
+    if not all_sse_data:
+        print("No SSE data found in any configuration")
+        return
+    
+    # Combine all SSE data
+    combined_sse = pd.concat(all_sse_data, ignore_index=True)
+    
+    # Filter to only include rows that start with identity (exclude mixed combinations)
+    combined_sse = combined_sse[combined_sse.apply(lambda row: row['topics'].startswith(row['identity']), axis=1)].copy()
+    
+    # Count number of activity topics in each combination
+    def count_activity_topics(topic_str, identity):
+        """Count number of activity topics in a combination string"""
+        if topic_str == f"{identity}_only":
+            return 0
+        else:
+            # Count activity topics (V1, V2, V3, etc.)
+            return len(re.findall(r'V\d+', topic_str))
+    
+    combined_sse['n_activity_in_combo'] = combined_sse.apply(
+        lambda row: count_activity_topics(row['topics'], row['identity']), axis=1
+    )
+    
+    # Create descriptive labels for combinations
+    def create_combo_label(n_activity):
+        if n_activity == 0:
+            return "Identity only"
+        elif n_activity == 1:
+            return "Identity + V1"
+        elif n_activity == 2:
+            return "Identity + V1 + V2"
+        elif n_activity == 3:
+            return "Identity + V1 + V2 + V3"
+        else:
+            return f"Identity + V1...V{n_activity}"
+    
+    # Sum SSE across all cell types for each model, topic config, and SPECIFIC activity combination
+    # Use same logic as individual plots to ensure consistency
+    aggregated_data = []
+    for model in combined_sse['model'].unique():
+        for topic_config in combined_sse['topic_config'].unique():
+            model_config_df = combined_sse[
+                (combined_sse['model'] == model) & 
+                (combined_sse['topic_config'] == topic_config)
+            ]
+            
+            # Use specific pattern matching like individual function
+            for n_activity in sorted(model_config_df['n_activity_in_combo'].unique()):
+                # Define the specific topic combination for this cumulative step
+                if n_activity == 0:
+                    target_pattern = "_only"
+                elif n_activity == 1:
+                    target_pattern = "+V1"
+                elif n_activity == 2:
+                    target_pattern = "+V1+V2"
+                elif n_activity == 3:
+                    target_pattern = "+V1+V2+V3"
                 else:
-                    topic_label = '+'.join(topics_now)
-                row = model_df[model_df['topics'] == topic_label]
-                if not row.empty:
-                    sse_vals.append(row['SSE'].values[0])
+                    # For higher numbers, construct the pattern
+                    v_parts = [f"V{i+1}" for i in range(n_activity)]
+                    target_pattern = "+" + "+".join(v_parts)
+                
+                # Find rows that match this specific pattern
+                if n_activity == 0:
+                    subset = model_config_df[model_config_df['topics'].str.endswith('_only')]
                 else:
-                    sse_vals.append(float('nan'))
-                x_labels.append(topics_now[-1])
-            all_results.append({
-                'model': model,
-                'n_activity': n_activity,
-                'sse_vals': sse_vals,
-                'x_labels': x_labels,
-                'config': config_name
-            })
-    # Plot
-    plt.figure(figsize=(max(8, (len(identity_topics)+max_n_activity)*1.2), 6))
-    for res in all_results:
-        label = f"{res['model']} ({res['n_activity']} activity)"
-        plt.plot(res['x_labels'], res['sse_vals'], marker='o', label=label)
-    plt.xlabel('Topic added (structure plot order)')
-    plt.ylabel('Cumulative SSE (test set)')
-    plt.title('Combined Cumulative SSE as topics are added')
+                    subset = model_config_df[model_config_df['topics'].str.endswith(target_pattern)]
+                
+                if len(subset) > 0:
+                    total_sse = subset['SSE'].sum()  # Sum across all cell types
+                    combo_label = create_combo_label(n_activity)
+                    n_total_topics = subset['n_total_topics'].iloc[0]
+                    
+                    aggregated_data.append({
+                        'model': model,
+                        'topic_config': topic_config,
+                        'n_total_topics': n_total_topics,
+                        'n_activity_combo': n_activity,
+                        'combo_label': combo_label,
+                        'total_sse': total_sse
+                    })
+    
+    aggregated_df = pd.DataFrame(aggregated_data)
+    
+    if aggregated_df.empty:
+        print("No aggregated data to plot")
+        return
+    
+    # Set up plot
+    plt.figure(figsize=(12, 8))
+    
+    # Define colors for models and line styles for topic configurations
+    model_colors = {'HLDA': 'blue', 'LDA': 'orange', 'NMF': 'green'}
+    
+    # Create flexible line styles based on available topic configurations
+    unique_topic_counts = sorted(aggregated_df['n_total_topics'].unique())
+    line_styles = ['-', '--', '-.', ':']  # solid, dashed, dash-dot, dotted
+    topic_line_styles = {}
+    for i, n_topics in enumerate(unique_topic_counts):
+        style_idx = i % len(line_styles)
+        topic_line_styles[n_topics] = line_styles[style_idx]
+    
+    # Get all possible combination labels in order
+    max_activity_in_data = aggregated_df['n_activity_combo'].max()
+    all_combo_labels = [create_combo_label(i) for i in range(max_activity_in_data + 1)]
+    
+    # Plot lines for each model and topic configuration combination
+    for model in sorted(aggregated_df['model'].unique()):
+        for n_topics in sorted(aggregated_df['n_total_topics'].unique()):
+            subset = aggregated_df[
+                (aggregated_df['model'] == model) & 
+                (aggregated_df['n_total_topics'] == n_topics)
+            ].sort_values('n_activity_combo')
+            
+            if len(subset) > 0:
+                # Create label for legend
+                label = f"{model} ({n_topics} topics)"
+                
+                # Get color and line style
+                color = model_colors.get(model, 'black')
+                linestyle = topic_line_styles[n_topics]
+                
+                # Plot the line (only for available data points)
+                plt.plot(subset['combo_label'], subset['total_sse'], 
+                        color=color, linestyle=linestyle, marker='o', 
+                        label=label, linewidth=2, markersize=6)
+    
+    plt.xlabel('Topic Combination')
+    plt.ylabel('Total SSE (summed across cell types)')
+    plt.title('Cumulative SSE Comparison Across Model Configurations\n' +
+              'Colors = Models, Line Styles = Topic Counts')
     plt.xticks(rotation=45, ha='right')
-    plt.legend(title='Model/config', bbox_to_anchor=(1.01, 1), loc='upper left')
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.grid(True, alpha=0.3)
     plt.tight_layout()
+    
+    # Save plot
     Path(plot_dir).mkdir(parents=True, exist_ok=True)
-    plt.savefig(Path(plot_dir) / 'combined_cumulative_sse_by_topic.png', dpi=200)
+    plt.savefig(Path(plot_dir) / 'combined_cumulative_sse_by_topic.png', dpi=200, bbox_inches='tight')
     plt.close()
+    
+    # Print summary of what was plotted
+    print(f"Created combined SSE line plot with:")
+    print(f"  Models: {', '.join(sorted(aggregated_df['model'].unique()))}")
+    print(f"  Topic configurations: {', '.join([str(x) for x in sorted(aggregated_df['n_total_topics'].unique())])}")
+    print(f"  Activity combinations: {', '.join(all_combo_labels[:max_activity_in_data + 1])}")
 
 def main():
     """Main function to run the comprehensive analysis."""
