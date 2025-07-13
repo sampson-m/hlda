@@ -21,4 +21,31 @@ glioma:
     - Prolif. stem-like
     - Stem-like
     - T cell
-    # Add more as needed 
+    # Add more as needed
+
+cancer_combined:
+  identities:
+    - T cell
+    - microglial cell
+    - B cell
+    - monocyte
+    - myeloid cell
+    - plasmacytoid dendritic cell, human
+    - fibroblast
+    - endothelial cell
+    - malignant cell
+
+cancer_disease_specific:
+  identities:
+    - breast_B cell
+    - breast_T cell
+    - breast_endothelial cell
+    - breast_fibroblast
+    - breast_malignant cell
+    - breast_myeloid cell
+    - breast_plasmacytoid dendritic cell, human
+    - melanoma_B cell
+    - melanoma_T cell
+    - melanoma_malignant cell
+    - melanoma_microglial cell
+    - melanoma_monocyte 

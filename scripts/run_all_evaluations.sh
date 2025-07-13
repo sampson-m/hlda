@@ -2,67 +2,175 @@
 
 CONFIG_FILE="dataset_identities.yaml"
 
-# PBMC
-DATASET="pbmc"
-for heldout_dir in estimates/pbmc/heldout_*; do
-  train_csv="$heldout_dir/filtered_counts_train.csv"
-  test_csv="$heldout_dir/filtered_counts_test.csv"
-  for config_dir in "$heldout_dir"/*_topic_fit; do
-    if [ -d "$config_dir" ]; then
-      n_topics=$(basename "$config_dir" | grep -oE '^[0-9]+')
-      n_identities=$(awk -v ds="$DATASET" '
-        $0 ~ "^"ds":" {in_ds=1}
-        in_ds && $0 ~ "^  identities:" {in_id=1; next}
-        in_ds && $0 ~ "^[^ ]" && !($0 ~ "^"ds":") {in_ds=0; in_id=0}
-        in_id && $0 ~ "^    - " {count++}
-        in_id && $0 !~ "^    - " && $0 !~ "^$" {exit}
-        END {print count+0}
-      ' "$CONFIG_FILE")
-      n_extra_topics=$((n_topics - n_identities))
-      echo "DEBUG: n_topics: $n_topics, n_identities: $n_identities, n_extra_topics: $n_extra_topics"
-      echo "Running: $config_dir ($n_extra_topics extra topics)"
-      python3 scripts/shared/evaluate_models.py \
-        --counts_csv "$train_csv" \
-        --test_csv "$test_csv" \
-        --output_dir "$config_dir" \
-        --n_extra_topics "$n_extra_topics" \
-        --dataset "$DATASET" \
-        --config_file "$CONFIG_FILE"
+echo "=========================================="
+echo "Running evaluations across all datasets"
+echo "=========================================="
+
+# Function to count identities for a dataset
+count_identities() {
+    local dataset=$1
+    # Find the section for this dataset and count the identity lines
+    sed -n "/^${dataset}:/,/^[a-zA-Z]/p" "$CONFIG_FILE" | grep -c "^    - " 2>/dev/null || echo "0"
+}
+
+# Function to run evaluations for a dataset
+run_evaluations() {
+    local base_dir=$1
+    local dataset=$2
+    local train_csv=$3
+    local test_csv=$4
+    
+    echo "----------------------------------------"
+    echo "Processing dataset: $dataset"
+    echo "Base directory: $base_dir"
+    echo "Train CSV: $train_csv"
+    echo "Test CSV: $test_csv"
+    echo "----------------------------------------"
+    
+    # Check if data files exist
+    if [ ! -f "$train_csv" ]; then
+        echo "WARNING: Train CSV not found: $train_csv"
+        return 1
     fi
-  done
+    if [ ! -f "$test_csv" ]; then
+        echo "WARNING: Test CSV not found: $test_csv"
+        return 1
+    fi
+    
+    # Count identities for this dataset
+    n_identities=$(count_identities "$dataset")
+    echo "Dataset $dataset has $n_identities identities"
+    
+    # Get topic configurations
+    topic_configs=()
+    for config_dir in $base_dir/*_topic_fit; do
+        if [ -d "$config_dir" ]; then
+            n_topics=$(basename "$config_dir" | grep -oE '^[0-9]+')
+            topic_configs+=("$n_topics")
+        fi
+    done
+    
+    if [ ${#topic_configs[@]} -eq 0 ]; then
+        echo "WARNING: No topic configurations found in $base_dir"
+        return 1
+    fi
+    
+    # Sort topic configurations
+    IFS=$'\n' topic_configs_sorted=($(sort -n <<<"${topic_configs[*]}"))
+    unset IFS
+    
+    echo "Found topic configurations: ${topic_configs_sorted[*]}"
+    
+    # Run evaluate_models.py for each configuration
+    for config_dir in $base_dir/*_topic_fit; do
+        if [ -d "$config_dir" ]; then
+            n_topics=$(basename "$config_dir" | grep -oE '^[0-9]+')
+            n_extra_topics=$((n_topics - n_identities))
+            
+            echo "Running evaluation: $config_dir ($n_extra_topics extra topics)"
+            
+            python3 scripts/shared/evaluate_models.py \
+                --counts_csv "$train_csv" \
+                --test_csv "$test_csv" \
+                --output_dir "$config_dir" \
+                --n_extra_topics "$n_extra_topics" \
+                --dataset "$dataset" \
+                --config_file "$CONFIG_FILE"
+            
+            if [ $? -ne 0 ]; then
+                echo "ERROR: evaluate_models.py failed for $config_dir"
+            else
+                echo "SUCCESS: evaluate_models.py completed for $config_dir"
+            fi
+        fi
+    done
+    
+    # Run analyze_all_fits.py
+    # topic_configs_str=$(IFS=,; echo "${topic_configs_sorted[*]}")
+    # echo "Running analyze_all_fits.py for $dataset with configurations: $topic_configs_str"
+    
+    # python3 scripts/shared/analyze_all_fits.py \
+    #     --base_dir "$base_dir" \
+    #     --topic_configs "$topic_configs_str" \
+    #     --config_file "$CONFIG_FILE"
+    
+    # if [ $? -ne 0 ]; then
+    #     echo "ERROR: analyze_all_fits.py failed for $dataset"
+    # else
+    #     echo "SUCCESS: analyze_all_fits.py completed for $dataset"
+    # fi
+    
+    # echo "Completed processing dataset: $dataset"
+    # echo ""
+}
+
+# ==========================================
+# PBMC Dataset
+# ==========================================
+echo "Starting PBMC dataset evaluations..."
+
+# PBMC has multiple heldout configurations
+for heldout_dir in estimates/pbmc/heldout_*; do
+    if [ -d "$heldout_dir" ]; then
+        heldout_size=$(basename "$heldout_dir" | grep -oE '[0-9]+')
+        echo "Processing PBMC heldout_$heldout_size"
+        
+        if [ "$heldout_size" == "1500" ]; then
+            train_csv="data/pbmc/filtered_counts_train.csv"
+            test_csv="data/pbmc/filtered_counts_test.csv"
+        else
+            train_csv="data/pbmc/filtered_counts.csv"
+            test_csv="data/pbmc/filtered_counts_test.csv"
+        fi
+        
+        run_evaluations "$heldout_dir" "pbmc" "$train_csv" "$test_csv"
+    fi
 done
 
-# GLIOMA
-DATASET="glioma"
-for config_dir in estimates/glioma/*_topic_fit; do
-  if [ -d "$config_dir" ]; then
-    train_csv="$config_dir/filtered_counts_train.csv"
-    test_csv="$config_dir/filtered_counts_test.csv"
-    n_topics=$(basename "$config_dir" | grep -oE '^[0-9]+')
-    n_identities=$(awk -v ds="$DATASET" '
-      $0 ~ "^"ds":" {in_ds=1}
-      in_ds && $0 ~ "^  identities:" {in_id=1; next}
-      in_ds && $0 ~ "^[^ ]" && !($0 ~ "^"ds":") {in_ds=0; in_id=0}
-      in_id && $0 ~ "^    - " {count++}
-      in_id && $0 !~ "^    - " && $0 !~ "^$" {exit}
-      END {print count+0}
-    ' "$CONFIG_FILE")
-    n_extra_topics=$((n_topics - n_identities))
-    echo "DEBUG: n_topics: $n_topics, n_identities: $n_identities, n_extra_topics: $n_extra_topics"
-    echo "Running: $config_dir ($n_extra_topics extra topics)"
-    python3 scripts/shared/evaluate_models.py \
-      --counts_csv "$train_csv" \
-      --test_csv "$test_csv" \
-      --output_dir "$config_dir" \
-      --n_extra_topics "$n_extra_topics" \
-      --dataset "$DATASET" \
-      --config_file "$CONFIG_FILE"
-  fi
-done
+# ==========================================
+# Glioma Dataset
+# ==========================================
+echo "Starting Glioma dataset evaluations..."
 
-# ANALYZE ALL FITS
-echo "Running analyze_all_fits.py for PBMC..."
-python3 scripts/shared/analyze_all_fits.py --base_dir estimates/pbmc --config_file "$CONFIG_FILE"
+run_evaluations "estimates/glioma" "glioma" \
+    "data/glioma/glioma_counts_train.csv" \
+    "data/glioma/glioma_counts_test.csv"
 
-echo "Running analyze_all_fits.py for GLIOMA..."
-python3 scripts/shared/analyze_all_fits.py --base_dir estimates/glioma --config_file "$CONFIG_FILE" 
+# ==========================================
+# Cancer Combined Dataset
+# ==========================================
+echo "Starting Cancer Combined dataset evaluations..."
+
+run_evaluations "estimates/cancer/combined" "cancer_combined" \
+    "data/cancer/cancer_counts_train_combined.csv" \
+    "data/cancer/cancer_counts_test_combined.csv"
+
+# ==========================================
+# Cancer Disease-Specific Dataset
+# ==========================================
+echo "Starting Cancer Disease-Specific dataset evaluations..."
+
+run_evaluations "estimates/cancer/disease_specific" "cancer_disease_specific" \
+    "data/cancer/cancer_counts_train_disease_specific.csv" \
+    "data/cancer/cancer_counts_test_disease_specific.csv"
+
+# ==========================================
+# Summary
+# ==========================================
+echo "=========================================="
+echo "All dataset evaluations completed!"
+echo "=========================================="
+echo ""
+echo "Processed datasets:"
+echo "- PBMC (multiple heldout configurations)"
+echo "- Glioma"
+echo "- Cancer Combined"
+echo "- Cancer Disease-Specific"
+echo ""
+echo "Generated outputs:"
+echo "- Model evaluation plots and metrics"
+echo "- SSE analysis and heatmaps"
+echo "- UMAP visualizations"
+echo "- Cosine similarity matrices"
+echo "- Theta heatmaps"
+echo "- Cross-model comparisons"

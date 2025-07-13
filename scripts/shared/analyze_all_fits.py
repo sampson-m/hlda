@@ -648,7 +648,7 @@ def main():
     # Try to infer dataset from base_dir name
     dataset_guess = None
     for ds in config.keys():
-        if ds in base_dir:
+        if ds in str(base_dir):
             dataset_guess = ds
             break
     if dataset_guess is None:
