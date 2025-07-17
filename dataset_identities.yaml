@@ -48,4 +48,9 @@ cancer_disease_specific:
     - melanoma_T cell
     - melanoma_malignant cell
     - melanoma_microglial cell
-    - melanoma_monocyte 
+    - melanoma_monocyte
+
+AB_V1:
+  identities:
+    - A
+    - B
