@@ -66,6 +66,10 @@ def compare_theta_true_vs_estimated(true_theta_path, estimated_theta_path, outpu
     true_theta = pd.read_csv(true_theta_path, index_col=0)
     est_theta = pd.read_csv(estimated_theta_path, index_col=0)
 
+    # Print first few index values for debugging
+    print(f"      [DEBUG] First 5 indices of true_theta: {list(true_theta.index[:5])}")
+    print(f"      [DEBUG] First 5 indices of est_theta: {list(est_theta.index[:5])}")
+
     # Perform topic matching for LDA/NMF models
     if method_name in ["LDA", "NMF"] and true_beta_path and estimated_beta_path:
         true_beta = pd.read_csv(true_beta_path, index_col=0)
@@ -115,12 +119,10 @@ def compare_theta_true_vs_estimated(true_theta_path, estimated_theta_path, outpu
         max_val = max(true_vals.max(), est_vals.max())
         ax.plot([min_val, max_val], [min_val, max_val], 'r--', alpha=0.8)
         
-        # Calculate correlation
-        corr = np.corrcoef(true_vals, est_vals)[0, 1]
         topic_label = true_theta.columns[i] if i < len(true_theta.columns) else f"Topic {i+1}"
-        ax.set_title(f"{topic_label}\nCorr: {corr:.3f}")
-        ax.set_xlabel("True Theta")
-        ax.set_ylabel("Estimated Theta")
+        ax.set_title(f"{topic_label}")
+        ax.set_xlabel(f"True Theta: {topic_label}")
+        ax.set_ylabel(f"Estimated Theta: {topic_label}")
         ax.grid(True, alpha=0.3)
     
     fig.suptitle(f"Theta Scatter Plots: True vs Estimated ({method_name})")
@@ -197,10 +199,8 @@ def compare_beta_true_vs_estimated(true_beta_path, estimated_beta_path, output_p
         max_val = max(true_vals.max(), est_vals.max())
         ax.plot([min_val, max_val], [min_val, max_val], 'r--', alpha=0.8)
         
-        # Calculate correlation
-        corr = np.corrcoef(true_vals, est_vals)[0, 1]
         topic_label = true_beta_scaled.columns[i] if i < len(true_beta_scaled.columns) else f"Topic {i+1}"
-        ax.set_title(f"{topic_label}\nCorr: {corr:.3f}")
+        ax.set_title(f"{topic_label}")
         ax.set_xlabel("True Beta (Scaled)")
         ax.set_ylabel("Estimated Beta")
         ax.grid(True, alpha=0.3)
@@ -286,12 +286,10 @@ def combine_theta_scatter_plots(true_theta_path, estimated_theta_paths, method_n
             max_val = max(true_vals.max(), est_vals.max())
             ax.plot([min_val, max_val], [min_val, max_val], 'r--', alpha=0.8)
             
-            # Calculate correlation
-            corr = np.corrcoef(true_vals, est_vals)[0, 1]
             topic_label = true_theta_model.columns[topic_idx] if topic_idx < len(true_theta_model.columns) else f"Topic {topic_idx+1}"
-            ax.set_title(f"{method_name} - {topic_label}\nCorr: {corr:.3f}")
-            ax.set_xlabel("True Theta")
-            ax.set_ylabel("Estimated Theta")
+            ax.set_title(f"{method_name} - {topic_label}")
+            ax.set_xlabel(f"True Theta: {topic_label}")
+            ax.set_ylabel(f"Estimated Theta: {topic_label}")
             ax.grid(True, alpha=0.3)
     
     plt.suptitle("Combined Theta Scatter Plots: True vs Estimated")
@@ -389,104 +387,205 @@ def combine_beta_scatter_plots(true_beta_path, estimated_beta_paths, method_name
     
     return fig
 
-def compute_signal_noise_metrics(X, theta, beta, L, n_identity_topics, output_path=None):
+
+def create_stacked_comparison_plots(results_dir, output_dir, true_theta=None, true_beta=None, dataset_name=""):
     """
-    Compute signal and noise metrics based on the orthogonalization analysis.
+    Create stacked comparison plots for all sampling methods.
+    
+    Parameters:
+    -----------
+    results_dir : str
+        Directory containing results from test_hlda_sampling_methods.py
+    output_dir : str
+        Directory to save comparison plots
+    true_theta : str, optional
+        Path to true theta.csv file
+    true_beta : str, optional
+        Path to true beta.csv file
+    dataset_name : str
+        Name of the dataset for plot titles
     """
-    # Convert to numpy arrays if needed
-    if isinstance(X, pd.DataFrame):
-        X = X.values
-    if isinstance(theta, pd.DataFrame):
-        theta = theta.values
-    if isinstance(beta, pd.DataFrame):
-        beta = beta.values
     
-    # Ensure correct shapes
-    assert X.shape[0] == theta.shape[0], "X and theta must have same number of cells"
-    assert X.shape[1] == beta.shape[0], "X and beta must have same number of genes"
-    assert theta.shape[1] == beta.shape[1], "theta columns must match beta columns"
+    results_path = Path(results_dir)
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
     
-    # Compute expected counts: L * theta * beta^T (since beta is genes×topics)
-    expected_counts = L * theta @ beta.T
+    # Define sampling methods to compare
+    methods = ['standard', 'annealing', 'blocked', 'tempered']
+    method_colors = {
+        'standard': '#1f77b4',
+        'annealing': '#ff7f0e', 
+        'blocked': '#2ca02c',
+        'tempered': '#d62728'
+    }
     
-    # Compute normalization term: sqrt(L * theta * beta)
-    normalization = np.sqrt(expected_counts)
+    # Load results for each method
+    results = {}
+    for method in methods:
+        method_dir = results_path / method
+        if method_dir.exists():
+            beta_file = method_dir / f"{method}_beta.csv"
+            theta_file = method_dir / f"{method}_theta.csv"
+            
+            if beta_file.exists() and theta_file.exists():
+                results[method] = {
+                    'beta': pd.read_csv(beta_file, index_col=0),
+                    'theta': pd.read_csv(theta_file, index_col=0),
+                    'method_dir': method_dir
+                }
+                print(f"✓ Loaded {method} results")
+            else:
+                print(f"✗ Missing files for {method}")
+        else:
+            print(f"✗ Method directory not found: {method}")
     
-    # Avoid division by zero
-    normalization = np.maximum(normalization, 1e-10)
+    if not results:
+        print("No results found!")
+        return
     
-    # Normalized count matrix
-    X_norm = X / normalization
+    # Create stacked comparison plots
+    print(f"\nCreating comparison plots...")
     
-    # Expected normalized counts
-    expected_norm = expected_counts / normalization
+    # 1. Beta comparison (gene-topic distributions)
+    if true_beta and Path(true_beta).exists():
+        print("  Creating beta comparison plot...")
+        create_beta_comparison_plot(results, true_beta, output_path, method_colors, dataset_name)
     
-    # Poisson noise term: (X - expected) / sqrt(expected)
-    poisson_noise = (X - expected_counts) / normalization
+    # 2. Theta comparison (cell-topic distributions)  
+    if true_theta and Path(true_theta).exists():
+        print("  Creating theta comparison plot...")
+        create_theta_comparison_plot(results, true_theta, output_path, method_colors, dataset_name)
     
-    # QR decomposition of beta matrix (beta is genes×topics)
-    Q, R = scipy.linalg.qr(beta)  # QR of beta so Q has shape (genes x topics)
+    # 3. Summary statistics table
+    print("  Creating summary statistics...")
+    create_summary_table(results, output_path, dataset_name)
     
-    # Transform theta: theta_tilde = theta * R^T
-    theta_tilde = theta @ R.T
+    print(f"\n✓ Comparison plots saved to: {output_path}")
+
+
+def create_beta_comparison_plot(results, true_beta_path, output_path, method_colors, dataset_name):
+    """Create stacked beta comparison plot using existing functions."""
     
-    # Orthogonal beta: beta_tilde = Q^T (topics x genes)
-    beta_tilde = Q.T
+    # Prepare paths and method names for the existing combine function
+    estimated_beta_paths = []
+    method_names = []
     
-    # Separate identity and activity topics
-    identity_indices = list(range(n_identity_topics))
-    activity_indices = list(range(n_identity_topics, theta.shape[1]))
+    for method in ['standard', 'annealing', 'blocked', 'tempered']:
+        if method in results:
+            beta_file = results[method]['method_dir'] / f"{method}_beta.csv"
+            if beta_file.exists():
+                estimated_beta_paths.append(str(beta_file))
+                method_names.append(method.upper())
     
-    if len(activity_indices) == 0:
-        # No activity topics - all signal is identity signal
-        results = {
-            'noise': np.linalg.norm(X_norm - expected_norm + poisson_noise, 'fro'),
-            'identity_signal': np.linalg.norm(X_norm - expected_norm, 'fro'),
-            'activity_signal': 0.0
+    if estimated_beta_paths:
+        # Use the existing combine function
+        combine_beta_scatter_plots(
+            true_beta_path=true_beta_path,
+            estimated_beta_paths=estimated_beta_paths,
+            method_names=method_names,
+            output_path=str(output_path / 'beta_comparison_stacked.png')
+        )
+        print(f"  ✓ Beta comparison plot created using existing function")
+
+
+def create_theta_comparison_plot(results, true_theta_path, output_path, method_colors, dataset_name):
+    """Create stacked theta comparison plot using existing functions."""
+    
+    # First, fix cell indices in the theta files to match the true theta format
+    # Look for train_cells.csv in the same directory as true_theta_path
+    true_theta_dir = Path(true_theta_path).parent
+    train_cells_file = true_theta_dir / "train_cells.csv"
+    
+    if train_cells_file.exists():
+        print(f"  Fixing cell indices using {train_cells_file}")
+        train_cells = pd.read_csv(train_cells_file)['cell']
+        
+        for method in ['standard', 'annealing', 'blocked', 'tempered']:
+            if method in results:
+                theta_file = results[method]['method_dir'] / f"{method}_theta.csv"
+                if theta_file.exists():
+                    train_theta = pd.read_csv(theta_file, index_col=0)
+                    if len(train_theta) == len(train_cells):
+                        train_theta.index = train_cells
+                        train_theta.to_csv(theta_file)
+                        print(f"    ✓ Fixed cell indices for {method}")
+                    else:
+                        print(f"    ⚠ Length mismatch for {method}: {len(train_theta)} vs {len(train_cells)}")
+    
+    # Prepare paths and method names for the existing combine function
+    estimated_theta_paths = []
+    method_names = []
+    
+    for method in ['standard', 'annealing', 'blocked', 'tempered']:
+        if method in results:
+            theta_file = results[method]['method_dir'] / f"{method}_theta.csv"
+            if theta_file.exists():
+                estimated_theta_paths.append(str(theta_file))
+                method_names.append(method.upper())
+    
+    if estimated_theta_paths:
+        try:
+            # Use the existing combine function
+            combine_theta_scatter_plots(
+                true_theta_path=true_theta_path,
+                estimated_theta_paths=estimated_theta_paths,
+                method_names=method_names,
+                output_path=str(output_path / 'theta_comparison_stacked.png')
+            )
+            print(f"  ✓ Theta comparison plot created using existing function")
+        except Exception as e:
+            print(f"  ⚠ Warning: Could not create theta comparison plot: {e}")
+            print(f"    This may be due to cell index mismatches between true and estimated theta files")
+            print(f"    Skipping theta comparison plot")
+
+
+def create_summary_table(results, output_path, dataset_name):
+    """Create summary statistics table."""
+    
+    summary_data = []
+    
+    for method, data in results.items():
+        beta = data['beta']
+        theta = data['theta']
+        
+        # Calculate summary statistics
+        beta_stats = {
+            'Method': method.upper(),
+            'Beta_Mean': beta.values.mean(),
+            'Beta_Std': beta.values.std(),
+            'Beta_Min': beta.values.min(),
+            'Beta_Max': beta.values.max(),
+            'Theta_Mean': theta.values.mean(),
+            'Theta_Std': theta.values.std(),
+            'Theta_Min': theta.values.min(),
+            'Theta_Max': theta.values.max(),
         }
-    else:
-        # Decompose activity topic(s) - for simplicity, handle first activity topic
-        activity_idx = activity_indices[0]
-        beta_A = beta_tilde[activity_idx, :]  # Activity topic (genes,)
-        
-        # Project activity topic onto identity topics
-        beta_identity = beta_tilde[identity_indices, :]  # Identity topics (n_identity x genes)
-        
-        # Compute projections: s_i = <beta_i, beta_A>
-        projections = beta_identity @ beta_A  # (n_identity,)
-        
-        # Compute parallel component: sum_i s_i * beta_i
-        parallel_component = projections @ beta_identity  # (genes,)
-        
-        # Compute perpendicular component: beta_A - parallel_component
-        perpendicular_component = beta_A - parallel_component  # (genes,)
-        
-        # Compute signal components
-        # Identity signal: theta_i * beta_i + theta_A * parallel_component
-        identity_signal_matrix = (theta_tilde[:, identity_indices] @ beta_identity + 
-                                np.outer(theta_tilde[:, activity_idx], parallel_component))
-        
-        # Activity signal: theta_A * perpendicular_component
-        activity_signal_matrix = np.outer(theta_tilde[:, activity_idx], perpendicular_component)
-        
-        # Normalize by L and normalization term
-        identity_signal_norm = L * identity_signal_matrix / normalization
-        activity_signal_norm = L * activity_signal_matrix / normalization
-        
-        # Compute metrics (Frobenius norms)
-        results = {
-            'noise': np.linalg.norm(X_norm - expected_norm + poisson_noise, 'fro'),
-            'identity_signal': np.linalg.norm(X_norm - identity_signal_norm, 'fro'),
-            'activity_signal': np.linalg.norm(X_norm - activity_signal_norm, 'fro')
-        }
+        summary_data.append(beta_stats)
     
-    # Save results if output path provided
-    if output_path:
-        results_df = pd.DataFrame([results])
-        results_df.to_csv(output_path, index=False)
-        print(f"Saved signal/noise metrics to {output_path}")
+    summary_df = pd.DataFrame(summary_data)
+    summary_df.to_csv(output_path / 'summary_statistics.csv', index=False)
     
-    return results
+    # Create a nice formatted table
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.axis('tight')
+    ax.axis('off')
+    
+    # Format the data for display
+    display_df = summary_df.copy()
+    for col in display_df.columns:
+        if col != 'Method' and col in display_df.columns:
+            display_df[col] = display_df[col].apply(lambda x: f'{x:.4f}')
+    
+    table = ax.table(cellText=display_df.values, colLabels=display_df.columns, 
+                    cellLoc='center', loc='center')
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1.2, 1.5)
+    
+    plt.title(f'Summary Statistics - {dataset_name}', fontsize=14, fontweight='bold', pad=20)
+    plt.savefig(output_path / 'summary_statistics.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compare true vs estimated thetas and plot correlation heatmap.")
