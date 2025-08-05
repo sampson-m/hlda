@@ -1302,6 +1302,7 @@ def compute_noise_analysis(data_root="data", output_dir="estimates"):
         all_results[key] = {
             'dataset_name': dataset_name,
             'de_mean': float(de_mean.replace('DE_mean_', '')),
+            'de_mean_dir': de_mean,  # Keep original directory name
             'topic_names': topic_names,
             'identity_topics': identity_topics,
             'activity_topics': activity_topics,
@@ -1317,9 +1318,10 @@ def compute_noise_analysis(data_root="data", output_dir="estimates"):
     for key, data in all_results.items():
         dataset_name = data['dataset_name']
         de_mean = data['de_mean']
+        de_mean_dir = data['de_mean_dir']  # Use original directory name
         
         # Create output directory in estimates structure
-        output_subdir = estimates_path / dataset_name / f"DE_mean_{de_mean}" / "noise_analysis"
+        output_subdir = estimates_path / dataset_name / de_mean_dir / "noise_analysis"
         output_subdir.mkdir(parents=True, exist_ok=True)
         
         # Save detailed results
@@ -1355,6 +1357,9 @@ def compute_noise_analysis(data_root="data", output_dir="estimates"):
     
     # Create model recovery analysis with improved visualization
     create_model_recovery_analysis(all_results, estimates_path, data_root)
+    
+    # Create topic-specific recovery plots (new improved version)
+    create_topic_specific_recovery_plots(all_results, estimates_path, data_root)
     
     # Create comprehensive plots for each dataset separately
     create_comprehensive_plots_by_dataset(all_results, estimates_path, data_root)
@@ -1702,7 +1707,7 @@ def create_eigenvalue_histogram_pdfs(all_results, estimates_path):
 
 def compute_model_recovery_metrics(estimates_path, data_root):
     """
-    Compute model recovery metrics for HLDA, LDA, and NMF models with proper topic matching.
+    Compute model recovery metrics for HLDA, LDA, and NMF models using average residuals.
     
     Returns:
     --------
@@ -1813,14 +1818,28 @@ def compute_model_recovery_metrics(estimates_path, data_root):
                         # Use Hungarian algorithm to find optimal topic matching
                         true_indices, est_indices = linear_sum_assignment(-correlation_matrix)  # Negative for maximization
                         
-                        # Store individual topic correlations
+                        # Store individual topic correlations and residuals
                         for true_idx, est_idx in zip(true_indices, est_indices):
                             if true_idx < len(true_topic_names) and est_idx < len(est_topic_names):
                                 true_topic_name = true_topic_names[true_idx]
                                 est_topic_name = est_topic_names[est_idx]
                                 theta_corr = correlation_matrix[true_idx, est_idx]
                                 
-                                # For beta correlations, we need to match genes
+                                # Compute median percent residuals for theta
+                                true_theta_topic = true_theta_subset.iloc[:, true_idx].values
+                                est_theta_topic = est_theta_subset.iloc[:, est_idx].values
+                                
+                                # Normalize to probabilities for fair comparison
+                                true_theta_topic_norm = true_theta_topic / np.sum(true_theta_topic)
+                                est_theta_topic_norm = est_theta_topic / np.sum(est_theta_topic)
+                                
+                                # Compute percent residuals: |true - est| / true * 100
+                                # Add small epsilon to avoid division by zero
+                                epsilon = 1e-10
+                                theta_percent_residuals = np.abs(true_theta_topic_norm - est_theta_topic_norm) / (true_theta_topic_norm + epsilon) * 100
+                                median_theta_residual = np.median(theta_percent_residuals)
+                                
+                                # For beta correlations and residuals, we need to match genes
                                 if true_idx < true_beta.shape[1] and est_idx < est_beta.shape[1]:
                                     # Get common genes
                                     common_genes = [gene for gene in true_beta.index if gene in est_beta.index]
@@ -1829,10 +1848,22 @@ def compute_model_recovery_metrics(estimates_path, data_root):
                                         est_beta_topic = est_beta.loc[common_genes, est_topic_name]
                                         beta_corr = np.corrcoef(true_beta_topic, est_beta_topic)[0, 1]
                                         beta_corr = beta_corr if not np.isnan(beta_corr) else 0
+                                        
+                                        # Compute median percent residuals for beta
+                                        true_beta_topic_norm = true_beta_topic.values / np.sum(true_beta_topic.values)
+                                        est_beta_topic_norm = est_beta_topic.values / np.sum(est_beta_topic.values)
+                                        
+                                        # Compute percent residuals: |true - est| / true * 100
+                                        # Add small epsilon to avoid division by zero
+                                        epsilon = 1e-10
+                                        beta_percent_residuals = np.abs(true_beta_topic_norm - est_beta_topic_norm) / (true_beta_topic_norm + epsilon) * 100
+                                        median_beta_residual = np.median(beta_percent_residuals)
                                     else:
                                         beta_corr = 0
+                                        median_beta_residual = np.nan
                                 else:
                                     beta_corr = 0
+                                    avg_beta_residual = np.nan
                                 
                                 recovery_data.append({
                                     'dataset': dataset_name,
@@ -1843,6 +1874,8 @@ def compute_model_recovery_metrics(estimates_path, data_root):
                                     'est_topic': est_topic_name,
                                     'theta_corr': theta_corr,
                                     'beta_corr': beta_corr,
+                                    'median_theta_residual_pct': median_theta_residual,
+                                    'median_beta_residual_pct': median_beta_residual,
                                     'topic_pair': f"{true_topic_name} ↔ {est_topic_name}"
                                 })
                         
@@ -1920,7 +1953,7 @@ def create_model_recovery_analysis(all_results, estimates_path, data_root):
         # Create scatter plots with improved styling
         fig, axes = plt.subplots(2, 2, figsize=(16, 12))
         
-        # Plot 1: Activity SNR vs Theta Correlation
+        # Plot 1: Activity SNR vs Theta Residual
         ax1 = axes[0, 0]
         for true_topic in dataset_df['true_topic'].unique():
             topic_data = dataset_df[dataset_df['true_topic'] == true_topic]
@@ -1930,18 +1963,25 @@ def create_model_recovery_analysis(all_results, estimates_path, data_root):
                 method_data = topic_data[topic_data['method'] == method]
                 marker = model_markers.get(method, 'o')
                 
-                ax1.scatter(method_data['activity_snr'], method_data['theta_corr'], 
-                           label=f'{true_topic} ({method})', alpha=0.8, s=80, 
-                           color=color, marker=marker, edgecolors='black', linewidth=0.5)
+                # Use residuals instead of correlation
+                valid_data = method_data.dropna(subset=['median_theta_residual_pct'])
+                if len(valid_data) > 0:
+                    ax1.scatter(valid_data['activity_snr'], valid_data['median_theta_residual_pct'], 
+                               label=f'{true_topic} ({method})', alpha=0.8, s=80, 
+                               color=color, marker=marker, edgecolors='black', linewidth=0.5)
         
         ax1.set_xlabel('Activity Signal-to-Noise Ratio', fontsize=12)
-        ax1.set_ylabel('Theta Correlation', fontsize=12)
-        ax1.set_title(f'{dataset_name}: Theta Correlation vs Activity SNR', fontsize=14, fontweight='bold')
+        ax1.set_ylabel('Median Theta Residual (%)', fontsize=12)
+        ax1.set_title(f'{dataset_name}: Theta Residual vs Activity SNR', fontsize=14, fontweight='bold')
         ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=9)
         ax1.grid(True, alpha=0.3)
         ax1.tick_params(axis='both', which='major', labelsize=10)
         
-        # Plot 2: Activity SNR vs Beta Correlation
+        # Remove scientific notation
+        ax1.ticklabel_format(style='plain', axis='y')
+        ax1.ticklabel_format(style='plain', axis='x')
+        
+        # Plot 2: Activity SNR vs Beta Residual
         ax2 = axes[0, 1]
         for true_topic in dataset_df['true_topic'].unique():
             topic_data = dataset_df[dataset_df['true_topic'] == true_topic]
@@ -1951,18 +1991,25 @@ def create_model_recovery_analysis(all_results, estimates_path, data_root):
                 method_data = topic_data[topic_data['method'] == method]
                 marker = model_markers.get(method, 'o')
                 
-                ax2.scatter(method_data['activity_snr'], method_data['beta_corr'], 
-                           label=f'{true_topic} ({method})', alpha=0.8, s=80,
-                           color=color, marker=marker, edgecolors='black', linewidth=0.5)
+                # Use residuals instead of correlation
+                valid_data = method_data.dropna(subset=['median_beta_residual_pct'])
+                if len(valid_data) > 0:
+                    ax2.scatter(valid_data['activity_snr'], valid_data['median_beta_residual_pct'], 
+                               label=f'{true_topic} ({method})', alpha=0.8, s=80,
+                               color=color, marker=marker, edgecolors='black', linewidth=0.5)
         
         ax2.set_xlabel('Activity Signal-to-Noise Ratio', fontsize=12)
-        ax2.set_ylabel('Beta Correlation', fontsize=12)
-        ax2.set_title(f'{dataset_name}: Beta Correlation vs Activity SNR', fontsize=14, fontweight='bold')
+        ax2.set_ylabel('Median Beta Residual (%)', fontsize=12)
+        ax2.set_title(f'{dataset_name}: Beta Residual vs Activity SNR', fontsize=14, fontweight='bold')
         ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=9)
         ax2.grid(True, alpha=0.3)
         ax2.tick_params(axis='both', which='major', labelsize=10)
         
-        # Plot 3: DE Mean vs Theta Correlation
+        # Remove scientific notation
+        ax2.ticklabel_format(style='plain', axis='y')
+        ax2.ticklabel_format(style='plain', axis='x')
+        
+        # Plot 3: DE Mean vs Theta Residual
         ax3 = axes[1, 0]
         for true_topic in dataset_df['true_topic'].unique():
             topic_data = dataset_df[dataset_df['true_topic'] == true_topic]
@@ -1972,17 +2019,24 @@ def create_model_recovery_analysis(all_results, estimates_path, data_root):
                 method_data = topic_data[topic_data['method'] == method]
                 marker = model_markers.get(method, 'o')
                 
-                ax3.scatter(method_data['de_mean'], method_data['theta_corr'], 
-                           color=color, marker=marker, s=80, alpha=0.8, zorder=5,
-                           edgecolors='black', linewidth=0.5)
+                # Use residuals instead of correlation
+                valid_data = method_data.dropna(subset=['median_theta_residual_pct'])
+                if len(valid_data) > 0:
+                    ax3.scatter(valid_data['de_mean'], valid_data['median_theta_residual_pct'], 
+                               color=color, marker=marker, s=80, alpha=0.8, zorder=5,
+                               edgecolors='black', linewidth=0.5)
         
         ax3.set_xlabel('DE Mean', fontsize=12)
-        ax3.set_ylabel('Theta Correlation', fontsize=12)
-        ax3.set_title(f'{dataset_name}: Theta Correlation vs DE Mean', fontsize=14, fontweight='bold')
+        ax3.set_ylabel('Median Theta Residual (%)', fontsize=12)
+        ax3.set_title(f'{dataset_name}: Theta Residual vs DE Mean', fontsize=14, fontweight='bold')
         ax3.grid(True, alpha=0.3)
         ax3.tick_params(axis='both', which='major', labelsize=10)
         
-        # Plot 4: DE Mean vs Beta Correlation
+        # Remove scientific notation
+        ax3.ticklabel_format(style='plain', axis='y')
+        ax3.ticklabel_format(style='plain', axis='x')
+        
+        # Plot 4: DE Mean vs Beta Residual
         ax4 = axes[1, 1]
         for true_topic in dataset_df['true_topic'].unique():
             topic_data = dataset_df[dataset_df['true_topic'] == true_topic]
@@ -1992,41 +2046,48 @@ def create_model_recovery_analysis(all_results, estimates_path, data_root):
                 method_data = topic_data[topic_data['method'] == method]
                 marker = model_markers.get(method, 'o')
                 
-                ax4.scatter(method_data['de_mean'], method_data['beta_corr'], 
-                           color=color, marker=marker, s=80, alpha=0.8, zorder=5,
-                           edgecolors='black', linewidth=0.5)
+                # Use residuals instead of correlation
+                valid_data = method_data.dropna(subset=['median_beta_residual_pct'])
+                if len(valid_data) > 0:
+                    ax4.scatter(valid_data['de_mean'], valid_data['median_beta_residual_pct'], 
+                               color=color, marker=marker, s=80, alpha=0.8, zorder=5,
+                               edgecolors='black', linewidth=0.5)
         
         ax4.set_xlabel('DE Mean', fontsize=12)
-        ax4.set_ylabel('Beta Correlation', fontsize=12)
-        ax4.set_title(f'{dataset_name}: Beta Correlation vs DE Mean', fontsize=14, fontweight='bold')
+        ax4.set_ylabel('Median Beta Residual (%)', fontsize=12)
+        ax4.set_title(f'{dataset_name}: Beta Residual vs DE Mean', fontsize=14, fontweight='bold')
         ax4.grid(True, alpha=0.3)
         ax4.tick_params(axis='both', which='major', labelsize=10)
+        
+        # Remove scientific notation
+        ax4.ticklabel_format(style='plain', axis='y')
+        ax4.ticklabel_format(style='plain', axis='x')
         
         plt.tight_layout()
         
         # Save to dataset-specific directory
         dataset_dir = estimates_path / dataset_name
         dataset_dir.mkdir(exist_ok=True)
-        plt.savefig(dataset_dir / "model_recovery_analysis.png", dpi=300, bbox_inches='tight')
+        plt.savefig(dataset_dir / "model_recovery_analysis_residuals.png", dpi=300, bbox_inches='tight')
         plt.close()
         
         # Save recovery data to dataset-specific directory
-        dataset_df.to_csv(dataset_dir / "model_recovery_analysis.csv", index=False)
+        dataset_df.to_csv(dataset_dir / "model_recovery_analysis_residuals.csv", index=False)
         
         print(f"    ✓ {dataset_name} model recovery plots saved to: {dataset_dir}")
-        print(f"    Recovery data includes {len(dataset_df)} data points")
+        print(f"    Recovery data with residuals includes {len(dataset_df)} data points")
         
         # Print summary statistics for this dataset
         print(f"    Model Recovery Summary for {dataset_name}:")
         for method in dataset_df['method'].unique():
             method_data = dataset_df[dataset_df['method'] == method]
-            avg_theta = method_data['theta_corr'].mean()
-            avg_beta = method_data['beta_corr'].mean()
-            print(f"      {method}: Avg Theta Corr = {avg_theta:.3f}, Avg Beta Corr = {avg_beta:.3f}")
+            median_theta_residual = method_data['median_theta_residual_pct'].median()
+            median_beta_residual = method_data['median_beta_residual_pct'].median()
+            print(f"      {method}: Median Theta Residual = {median_theta_residual:.2f}%, Median Beta Residual = {median_beta_residual:.2f}%")
     
     # Also save the combined data to the main estimates directory
-    merged_df.to_csv(estimates_path / "model_recovery_analysis.csv", index=False)
-    print(f"  Combined model recovery data saved to: {estimates_path}")
+    merged_df.to_csv(estimates_path / "model_recovery_analysis_residuals.csv", index=False)
+    print(f"  Combined model recovery data with residuals saved to: {estimates_path}")
 
 
 def create_topic_snr_scatter_plots(all_results, estimates_path):
@@ -2362,6 +2423,236 @@ def create_comprehensive_plots_by_dataset(all_results, estimates_path, data_root
         plt.close()
         
         print(f"  Comprehensive plot saved for {dataset_name}: {dataset_dir}/comprehensive_noise_analysis.png")
+
+
+def create_topic_specific_recovery_plots(all_results, estimates_path, data_root):
+    """
+    Create separate plots for each topic showing average residuals by model type across DE means.
+    
+    This creates cleaner, more focused visualizations where:
+    - Each plot shows one topic (A, B, C, D, V1, V2, etc.)
+    - X-axis shows DE means
+    - Y-axis shows average residuals
+    - Different model types (HLDA, LDA, NMF) are shown as different lines/markers
+    """
+    print("Creating topic-specific recovery plots...")
+    recovery_data = compute_model_recovery_metrics(estimates_path, data_root)
+    
+    if not recovery_data:
+        print("  No model recovery data found. Skipping topic-specific recovery analysis.")
+        return
+    
+    # Create DataFrame
+    recovery_df = pd.DataFrame(recovery_data)
+    
+    # Set up colors and markers for model types
+    model_colors = {
+        'HLDA': '#1f77b4',  # Blue
+        'LDA': '#ff7f0e',   # Orange
+        'NMF': '#2ca02c'    # Green
+    }
+    
+    model_markers = {
+        'HLDA': 'o',  # Circle
+        'LDA': 's',   # Square
+        'NMF': '^'    # Triangle
+    }
+    
+    # Group data by dataset
+    datasets = {}
+    for _, row in recovery_df.iterrows():
+        dataset = row['dataset']
+        if dataset not in datasets:
+            datasets[dataset] = []
+        datasets[dataset].append(row)
+    
+    # Process each dataset separately
+    for dataset_name, dataset_data in datasets.items():
+        print(f"  Creating topic-specific plots for {dataset_name}...")
+        
+        dataset_df = pd.DataFrame(dataset_data)
+        
+        # Get unique topics in this dataset
+        unique_topics = sorted(dataset_df['true_topic'].unique())
+        
+        # Create separate plots for theta and beta residuals
+        for residual_type in ['theta', 'beta']:
+            residual_col = f'median_{residual_type}_residual_pct'
+            
+            # Skip if no valid residual data
+            if residual_col not in dataset_df.columns or dataset_df[residual_col].isna().all():
+                continue
+            
+            # Create subplots for each topic
+            n_topics = len(unique_topics)
+            n_cols = min(3, n_topics)  # Max 3 columns
+            n_rows = (n_topics + n_cols - 1) // n_cols
+            
+            fig, axes = plt.subplots(n_rows, n_cols, figsize=(6*n_cols, 5*n_rows))
+            if n_topics == 1:
+                axes = [axes]
+            elif n_rows == 1:
+                axes = axes.reshape(1, -1)
+            else:
+                axes = axes.reshape(n_rows, n_cols)
+            
+            # Create plot for each topic
+            for i, topic in enumerate(unique_topics):
+                row = i // n_cols
+                col = i % n_cols
+                ax = axes[row, col]
+                
+                # Get data for this topic
+                topic_data = dataset_df[dataset_df['true_topic'] == topic]
+                
+                # Plot each method
+                for method in ['HLDA', 'LDA', 'NMF']:
+                    method_data = topic_data[topic_data['method'] == method]
+                    
+                    if len(method_data) > 0:
+                        # Sort by DE mean for proper line plotting
+                        method_data = method_data.sort_values('de_mean')
+                        
+                        # Remove any NaN values
+                        valid_data = method_data.dropna(subset=[residual_col])
+                        
+                        if len(valid_data) > 0:
+                            color = model_colors.get(method, '#1f77b4')
+                            marker = model_markers.get(method, 'o')
+                            
+                            # Plot line with markers
+                            ax.plot(valid_data['de_mean'], valid_data[residual_col], 
+                                   marker=marker, color=color, linewidth=2, markersize=8,
+                                   label=method, alpha=0.8)
+                            
+                            # Add error bars if we have multiple measurements per DE mean
+                            if len(valid_data) > 1:
+                                # Group by DE mean and compute std
+                                grouped = valid_data.groupby('de_mean')[residual_col]
+                                means = grouped.mean()
+                                stds = grouped.std()
+                                
+                                for de_mean in means.index:
+                                    mean_val = means[de_mean]
+                                    std_val = stds[de_mean]
+                                    if not np.isnan(std_val):
+                                        ax.errorbar(de_mean, mean_val, yerr=std_val, 
+                                                  color=color, capsize=5, capthick=1, alpha=0.6)
+                
+                # Customize plot
+                ax.set_xlabel('DE Mean', fontsize=12)
+                ax.set_ylabel(f'Median {residual_type.capitalize()} Residual (%)', fontsize=12)
+                ax.set_title(f'Topic {topic}', fontsize=14, fontweight='bold')
+                ax.legend(fontsize=10)
+                ax.grid(True, alpha=0.3)
+                ax.tick_params(axis='both', which='major', labelsize=10)
+                
+                # Remove scientific notation
+                ax.ticklabel_format(style='plain', axis='y')
+                ax.ticklabel_format(style='plain', axis='x')
+                
+                # Set consistent y-axis limits across all plots for this residual type
+                all_residuals = dataset_df[residual_col].dropna()
+                if len(all_residuals) > 0:
+                    y_min = all_residuals.min() * 0.9
+                    y_max = all_residuals.max() * 1.1
+                    ax.set_ylim(y_min, y_max)
+            
+            # Hide empty subplots
+            for i in range(n_topics, n_rows * n_cols):
+                row = i // n_cols
+                col = i % n_cols
+                axes[row, col].set_visible(False)
+            
+            plt.tight_layout()
+            
+            # Save plot
+            dataset_dir = estimates_path / dataset_name
+            dataset_dir.mkdir(exist_ok=True)
+            plot_filename = f"topic_specific_{residual_type}_recovery.png"
+            plt.savefig(dataset_dir / plot_filename, dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            print(f"    ✓ {residual_type.capitalize()} recovery plot saved: {plot_filename}")
+        
+        # Also create a combined plot showing all topics together for comparison
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+        
+        # Theta residuals
+        for topic in unique_topics:
+            topic_data = dataset_df[dataset_df['true_topic'] == topic]
+            
+            for method in ['HLDA', 'LDA', 'NMF']:
+                method_data = topic_data[topic_data['method'] == method]
+                
+                if len(method_data) > 0:
+                    method_data = method_data.sort_values('de_mean')
+                    valid_data = method_data.dropna(subset=['median_theta_residual_pct'])
+                    
+                    if len(valid_data) > 0:
+                        color = model_colors.get(method, '#1f77b4')
+                        marker = model_markers.get(method, 'o')
+                        
+                        ax1.plot(valid_data['de_mean'], valid_data['median_theta_residual_pct'], 
+                               marker=marker, color=color, linewidth=2, markersize=6,
+                               label=f'{topic} ({method})', alpha=0.7)
+        
+        ax1.set_xlabel('DE Mean', fontsize=12)
+        ax1.set_ylabel('Median Theta Residual (%)', fontsize=12)
+        ax1.set_title(f'{dataset_name}: Theta Recovery by Topic and Method', fontsize=14, fontweight='bold')
+        ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+        ax1.grid(True, alpha=0.3)
+        
+        # Remove scientific notation
+        ax1.ticklabel_format(style='plain', axis='y')
+        ax1.ticklabel_format(style='plain', axis='x')
+        
+        # Beta residuals
+        for topic in unique_topics:
+            topic_data = dataset_df[dataset_df['true_topic'] == topic]
+            
+            for method in ['HLDA', 'LDA', 'NMF']:
+                method_data = topic_data[topic_data['method'] == method]
+                
+                if len(method_data) > 0:
+                    method_data = method_data.sort_values('de_mean')
+                    valid_data = method_data.dropna(subset=['median_beta_residual_pct'])
+                    
+                    if len(valid_data) > 0:
+                        color = model_colors.get(method, '#1f77b4')
+                        marker = model_markers.get(method, 'o')
+                        
+                        ax2.plot(valid_data['de_mean'], valid_data['median_beta_residual_pct'], 
+                               marker=marker, color=color, linewidth=2, markersize=6,
+                               label=f'{topic} ({method})', alpha=0.7)
+        
+        ax2.set_xlabel('DE Mean', fontsize=12)
+        ax2.set_ylabel('Median Beta Residual (%)', fontsize=12)
+        ax2.set_title(f'{dataset_name}: Beta Recovery by Topic and Method', fontsize=14, fontweight='bold')
+        ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+        ax2.grid(True, alpha=0.3)
+        
+        # Remove scientific notation
+        ax2.ticklabel_format(style='plain', axis='y')
+        ax2.ticklabel_format(style='plain', axis='x')
+        
+        plt.tight_layout()
+        
+        # Save combined plot
+        combined_filename = f"topic_specific_recovery_combined.png"
+        plt.savefig(dataset_dir / combined_filename, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"    ✓ Combined recovery plot saved: {combined_filename}")
+        
+        # Save the recovery data with residuals
+        dataset_df.to_csv(dataset_dir / "model_recovery_with_residuals.csv", index=False)
+        
+        print(f"    Recovery data with residuals saved for {dataset_name}")
+    
+    # Also save the combined data to the main estimates directory
+    recovery_df.to_csv(estimates_path / "model_recovery_with_residuals.csv", index=False)
+    print(f"  Combined recovery data with residuals saved to: {estimates_path}")
 
 
 if __name__ == "__main__":

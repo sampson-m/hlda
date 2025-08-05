@@ -16,41 +16,6 @@ import glob
 import yaml
 warnings.filterwarnings('ignore')
 
-def load_metrics_from_fits(base_dir: Path, topic_configs: list) -> pd.DataFrame:
-    """
-    Load all metrics from different topic configurations.
-    
-    Args:
-        base_dir: Base directory containing topic fit folders
-        topic_configs: List of topic configurations (e.g., ['7_topic_fit', '8_topic_fit', '9_topic_fit'])
-    
-    Returns:
-        DataFrame with all metrics combined
-    """
-    all_metrics = []
-    
-    for config in topic_configs:
-        config_dir = base_dir / config
-        metrics_file = config_dir / "metrics_summary.csv"
-        
-        if metrics_file.exists():
-            # Load basic metrics
-            metrics_df = pd.read_csv(metrics_file)
-            n_extra_topics = int(config.split('_')[0]) - 6  # 7->1, 8->2, 9->3
-            metrics_df['n_extra_topics'] = n_extra_topics
-            metrics_df['topic_config'] = config
-            all_metrics.append(metrics_df)
-            
-            print(f"Loaded metrics from {config}: {len(metrics_df)} models")
-        else:
-            print(f"Warning: No metrics file found in {config}")
-    
-    if all_metrics:
-        combined_metrics = pd.concat(all_metrics, ignore_index=True)
-        return combined_metrics
-    else:
-        return pd.DataFrame()
-
 def load_sse_from_fits(base_dir: Path, topic_configs: list) -> pd.DataFrame:
     """
     Load all SSE results from different topic configurations.
@@ -381,12 +346,6 @@ def create_comprehensive_sse_analysis(sse_df: pd.DataFrame, output_dir: Path):
     # Save the data
     pivot_df.to_csv(output_dir / 'comprehensive_sse_heatmap_data.csv')
     
-    # Create summary statistics
-    print("Creating summary statistics...")
-    
-    # Note: Best configuration recommendations removed as requested
-    print("  Best configuration analysis skipped (removed as requested)")
-    
     return {
         'comprehensive_pivot': pivot_df
     }
@@ -622,23 +581,12 @@ def main():
     topic_configs = [f'{n.strip()}_topic_fit' for n in args.topic_configs.split(',')]
     output_dir = Path(args.output_dir) if args.output_dir else base_dir / "model_comparison"
     config_file = args.config_file
-
-    print("Loading metrics from all topic configurations...")
-    metrics_df = load_metrics_from_fits(base_dir, topic_configs)
     print("Loading SSE results from all topic configurations...")
     sse_df = load_sse_from_fits(base_dir, topic_configs)
-    if metrics_df.empty:
-        print("Warning: No metrics data found!")
-    else:
-        print(f"Loaded {len(metrics_df)} metric records")
     if sse_df.empty:
         print("Error: No SSE data found!")
         return
     print(f"Loaded {len(sse_df)} SSE records")
-    # Create analysis outputs
-    if not metrics_df.empty:
-        print("Creating metrics matrix output...")
-        train_loglik_pivot, test_loglik_pivot = create_metrics_matrix_output(metrics_df, output_dir)
     print("Creating comprehensive SSE analysis...")
     sse_analysis = create_comprehensive_sse_analysis(sse_df, output_dir)
 

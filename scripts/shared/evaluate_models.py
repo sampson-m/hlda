@@ -40,27 +40,31 @@ from fit_hlda import get_default_parameters
 # Get default HLDA parameters
 HLDA_PARAMS = get_default_parameters()
 
-# Override with actual parameters used
-HLDA_PARAMS.update({
-    'n_loops': 15000,
-    'burn_in': 5000,
-    'thin': 40
-})
+# HLDA_PARAMS will be updated with CLI arguments in main()
 
 # --- Utility functions ---
+def extract_cell_identity(cell_id: str) -> str:
+    """
+    Extract cell identity from cell name.
+    
+    For simulation data, cell names are in the format "identity_cellnumber"
+    (e.g., "A_1", "B_2", "C_3").
+    
+    Args:
+        cell_id: Cell identifier string
+        
+    Returns:
+        Cell identity (e.g., "A", "B", "C")
+    """
+    if '_' in cell_id:
+        return cell_id.split('_')[0]
+    else:
+        # If no underscore, assume the whole string is the identity
+        return cell_id
+
 def ensure_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
     return path
-
-def extract_cell_identity(cell_name):
-    """Extract full cell type identities from cell names (e.g., "breast_T cell_1" -> "breast_T cell")"""
-    # Remove trailing number (e.g., "_1", "_2") to get the cell type
-    parts = cell_name.split('_')
-    if len(parts) > 1 and parts[-1].isdigit():
-        return '_'.join(parts[:-1])
-    return cell_name
-
-
 
 def plot_geweke_histograms(sample_root: Path, keys: list[str], out_dir: Path, n_save, n_cells, n_genes, n_topics):
     out_dir = ensure_dir(out_dir)
@@ -130,46 +134,28 @@ def estimate_theta_simplex(X: np.ndarray, B, l1) -> np.ndarray:
 def get_or_estimate_test_theta(test_df: pd.DataFrame, beta: pd.DataFrame, model_name: str, output_dir: Path) -> pd.DataFrame:
     """
     Get test theta by either loading from cache or estimating and saving.
-    
+    Now always recomputes and overwrites the file for testing purposes.
     Args:
         test_df: Test count matrix
         beta: Beta matrix for the model
         model_name: Name of the model (HLDA, LDA, NMF)
         output_dir: Directory to save/load theta file
-    
     Returns:
         Test theta DataFrame
     """
-    # Construct the theta file path
-    model_plots_dir = ensure_dir(output_dir / model_name / "plots")
-    theta_file = model_plots_dir / f"{model_name}_test_theta_nnls.csv"
-    
-    # Check if file exists and load it
-    if theta_file.exists():
-        try:
-            print(f"      ✓ Loading cached test theta for {model_name}: {theta_file}")
-            theta_test_df = pd.read_csv(theta_file, index_col=0)
-            # Verify the shape matches expectations
-            if theta_test_df.shape[0] == test_df.shape[0] and theta_test_df.shape[1] == beta.shape[1]:
-                return theta_test_df
-            else:
-                print(f"      ⚠ Cached theta shape mismatch, recomputing...")
-        except Exception as e:
-            print(f"      ⚠ Error loading cached theta, recomputing: {e}")
-    
-    # Compute theta if not cached or cache is invalid
-    print(f"      🔄 Computing test theta for {model_name}...")
+    # Construct the theta file path - write to outer layer model_comparison directory
+    model_comparison_dir = ensure_dir(output_dir / "model_comparison")
+    theta_file = model_comparison_dir / f"{model_name}_test_theta_nnls.csv"
+
+    print(f"      🔄 [TESTING] Always recomputing test theta for {model_name}...")
     X_test_prop = test_df.div(test_df.sum(axis=1), axis=0).values
     theta_test = estimate_theta_simplex(X_test_prop, beta.values, l1=0.002)
     theta_test_df = pd.DataFrame(theta_test, index=test_df.index, columns=beta.columns)
-    
-    # Save for future use
     try:
         theta_test_df.to_csv(theta_file)
         print(f"      ✓ Saved test theta for {model_name}: {theta_file}")
     except Exception as e:
         print(f"      ⚠ Could not save test theta: {e}")
-    
     return theta_test_df
 
 def incremental_sse_custom(
@@ -610,6 +596,7 @@ def plot_umap_scanpy_clustering(counts_df: pd.DataFrame, cell_identities: pd.Ser
     sc.pl.umap(adata, color='cell_type', ax=axes[1], show=False, 
                 title=f'{model_name}: Cell Type', size=15)
     
+    
     # 3. UMAP colored by scanpy clusters
     sc.pl.umap(adata, color='leiden', ax=axes[2], show=False, 
                 title=f'{model_name}: Scanpy Clusters', size=15)
@@ -919,7 +906,7 @@ def stack_theta_heatmaps(output_dir: Path, model_names: list = None):
         y_offset += img_height + label_height
     
     # Save combined image
-    output_file = output_dir / "plots" / "theta_heatmaps_combined.png"
+    output_file = output_dir / "model_comparison" / "theta_heatmaps_combined.png"
     ensure_dir(output_file.parent)
     
     plt.subplots_adjust(left=0, right=1, top=1, bottom=0, hspace=0, wspace=0)
@@ -1023,77 +1010,53 @@ def create_meta_cells_chunked(theta: pd.DataFrame, cell_identities: pd.Series,
                               cells_per_group: int, temp_dir: Path, model_name: str = None) -> Path:
     """
     Create meta-cells in chunks and save to disk to reduce memory usage.
-    
     Returns:
         Path to saved meta-cells CSV file
     """
     print(f"         Creating meta-cells in chunks...")
-    
     # Ensure temp directory exists
     temp_dir.mkdir(parents=True, exist_ok=True)
-    
     all_topics = list(theta.columns)
-    cell_types_to_process = sorted(cell_identities.unique())
-    
-    # Temporary file to store meta-cells (unique per model)
+    group_identities = cell_identities
+    cell_types_to_process = sorted(pd.Series(group_identities).unique())
+    print(f"         Processing {len(cell_types_to_process)} cell types...")
     if model_name:
         meta_cells_file = temp_dir / f"{model_name}_meta_cells.csv"
     else:
         meta_cells_file = temp_dir / "meta_cells_temp.csv"
+    # Remove the file if it already exists to avoid column misalignment
+    if meta_cells_file.exists():
+        meta_cells_file.unlink()
     meta_cells_list = []
     meta_identities_list = []
-    
-    print(f"         Processing {len(cell_types_to_process)} cell types...")
-    
+    wrote_header = False
     for ct_idx, ct in enumerate(cell_types_to_process):
-        
-        ct_mask = cell_identities == ct
+        ct_mask = group_identities == ct
         if not ct_mask.any():
             continue
-        
-        # Get cells for this type and convert to numpy immediately
-        try:
-            ct_cells = theta[ct_mask]
-        except Exception as e:
-            print(f"           Warning: Skipping {ct} due to indexing error: {e}")
-            continue
-            
+        ct_cells = theta.loc[ct_mask]
         ct_data = ct_cells.values.astype(np.float32)
-        
-        # Create meta-cells for this cell type
         ct_meta_cell_vectors = create_knn_meta_cells(ct_data, cells_per_group)
-        
-        # Convert to DataFrame and add to lists
         for i, meta_cell in enumerate(ct_meta_cell_vectors):
             meta_cells_list.append(meta_cell)
             meta_identities_list.append(ct)
-        
-        # Clean up intermediate data
         del ct_cells, ct_data, ct_meta_cell_vectors
         gc.collect()
-        
-        # Save progress every few cell types to avoid memory buildup
         if (ct_idx + 1) % 3 == 0 or ct_idx == len(cell_types_to_process) - 1:
             if meta_cells_list:
-                # Convert to DataFrame and save
                 meta_cells_df = pd.DataFrame(meta_cells_list, columns=all_topics)
                 meta_cells_df['cell_type'] = meta_identities_list
-                
-                # Append to file
-                if meta_cells_file.exists():
-                    meta_cells_df.to_csv(meta_cells_file, mode='a', header=False, index=False)
-                else:
+                # Write header only for the first chunk
+                if not wrote_header:
                     meta_cells_df.to_csv(meta_cells_file, index=False)
-                
-                
-                # Clear lists to free memory
+                    wrote_header = True
+                else:
+                    meta_cells_df.to_csv(meta_cells_file, mode='a', header=False, index=False)
                 meta_cells_list = []
                 meta_identities_list = []
                 del meta_cells_df
                 gc.collect()
-    
     return meta_cells_file
-
 
 def plot_theta_heatmap(theta: pd.DataFrame, cell_identities: pd.Series, model_name: str, out_png: Path, identity_topics: list, cells_per_group: int = 10, use_consistent_ordering: bool = False, reference_ordering: list = None):
     """
@@ -1125,14 +1088,20 @@ def plot_theta_heatmap(theta: pd.DataFrame, cell_identities: pd.Series, model_na
     
     # Apply topic ordering
     ordered_topics = sort_topics_for_display(all_topics)
-    
-    # Reorder the theta data columns to match
-    if 'cell_type' in theta.columns:
+    try:
+        # Check if all ordered topics exist in the data
+        missing_topics = [t for t in ordered_topics if t not in theta_data.columns]
+        if missing_topics:
+            print(f"    Warning: Missing topics in data: {missing_topics}")
+            # Use only topics that exist in the data
+            ordered_topics = [t for t in ordered_topics if t in theta_data.columns]
+        
         theta_data = theta_data[ordered_topics]
-    else:
-        theta_data = theta_data[ordered_topics]
-    
-    all_topics = ordered_topics  # Update for y-axis labels
+        all_topics = ordered_topics  # Update for y-axis labels
+    except KeyError as e:
+        print(f"    Warning: Column reordering failed: {e}")
+        # Fall back to original order
+        all_topics = list(theta_data.columns)
 
     # Smart ordering: alternate large and small groups to space out labels
     def get_smart_cell_type_order(cell_types_array):
@@ -1155,15 +1124,21 @@ def plot_theta_heatmap(theta: pd.DataFrame, cell_identities: pd.Series, model_na
         
         # Cancer combined ordering (distribute small types between large buffers)
         # T cell: 8,374 (39%) | malignant cell: 6,478 (30%) | fibroblast: 2,645 (12%) | myeloid cell: 1,896 (9%) | endothelial cell: 1,509 (7%) | B cell: 439 (2%) | monocyte: 94 (0.4%) | others: <100 each
-        cancer_combined_order = ['microglial cell', 'T cell', 'plasmacytoid dendritic cell', 'malignant cell', 'monocyte', 'fibroblast', 'B cell', 'myeloid cell', 'endothelial cell']
+        cancer_combined_order = ['microglial cell', 'T cell', 'plasmacytoid dendritic cell, human', 'malignant cell', 'monocyte', 'fibroblast', 'B cell', 'myeloid cell', 'endothelial cell']
         
         # Cancer disease-specific ordering (breast vs melanoma - just two large groups)
         cancer_disease_order = ['breast_T cell', 'melanoma_microglial cell', 'melanoma_T cell', 'melanoma_B cell', 'breast_fibroblast', 'melanoma_monocyte', 'breast_endothelial cell', 'breast_plasmacytoid dendritic cell', 'breast_myeloid cell', 'breast_malignant cell', 'breast_B cell', 'melanoma_malignant cell']
         
+        # Simulation dataset ordering (A and B identity types)
+        simulation_order = ['A', 'B']
+        
         # Detect which dataset we're working with and use appropriate ordering
         type_names = set(unique_types)
         
-        if 'T cells' in type_names or 'CD56+ NK' in type_names:
+        if 'A' in type_names and 'B' in type_names and len(type_names) == 2:
+            # Simulation dataset (AB_V1)
+            preferred_order = [ct for ct in simulation_order if ct in type_names]
+        elif 'T cells' in type_names or 'CD56+ NK' in type_names:
             # PBMC dataset
             preferred_order = [ct for ct in pbmc_order if ct in type_names]
         elif 'Diff.-like' in type_names or 'Stem-like' in type_names:
@@ -1218,7 +1193,7 @@ def plot_theta_heatmap(theta: pd.DataFrame, cell_identities: pd.Series, model_na
     min_width = max(8, len(unique_types) * 1.5)  # At least 1.5 inches per cell type
     max_width = 20
     fig_width = min(max_width, min_width)
-    fig_height = 0.7 * len(all_topics) + 3  # Extra space for rotated labels
+    fig_height = 0.7 * len(ordered_topics) + 3  # Extra space for rotated labels
 
     # Plot (transpose: topics as rows, meta-cells as columns)
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
@@ -1228,9 +1203,12 @@ def plot_theta_heatmap(theta: pd.DataFrame, cell_identities: pd.Series, model_na
     ax.set_xticks(xticks)
     ax.set_xticklabels(xticklabels, rotation=45, ha='right', fontsize=12)
     
-    # Y-axis: topics
-    ax.set_yticks(range(len(all_topics)))
-    ax.set_yticklabels(all_topics, fontsize=9)
+    # Y-axis: topics (use ordered topics to match reordered data)
+    ax.set_yticks(range(len(ordered_topics)))
+    ax.set_yticklabels(ordered_topics, fontsize=9)
+    
+    # Ensure y-axis limits show all topics
+    ax.set_ylim(-0.5, len(ordered_topics) - 0.5)
 
     # Draw colored rectangles for each cell type group on the x-axis
     type_colors = dict(zip(unique_types, sns.color_palette('tab20', n_colors=len(unique_types))))
@@ -1238,7 +1216,7 @@ def plot_theta_heatmap(theta: pd.DataFrame, cell_identities: pd.Series, model_na
     for ct in unique_types:
         ct_count = np.sum(reordered_cell_types == ct)
         if ct_count > 0:
-            ax.add_patch(mpatches.Rectangle((start-0.5, -0.5), ct_count, len(all_topics), color=type_colors[ct], alpha=0.08, linewidth=0))
+            ax.add_patch(mpatches.Rectangle((start-0.5, -0.5), ct_count, len(ordered_topics), color=type_colors[ct], alpha=0.08, linewidth=0))
             start += ct_count
     
     # Colorbar for expression
@@ -1369,12 +1347,23 @@ def main():
     parser.add_argument("--n_extra_topics", type=int, required=True, help="Number of extra topics (e.g. 3 for V1,V2,V3)")
     parser.add_argument("--dataset", type=str, required=True, help="Dataset name (must match a key in the config file)")
     parser.add_argument("--config_file", type=str, default="dataset_identities.yaml", help="Path to dataset identity config YAML file")
+    parser.add_argument("--n_loops", type=int, default=15000, help="HLDA number of loops (default: 15000)")
+    parser.add_argument("--burn_in", type=int, default=5000, help="HLDA burn-in iterations (default: 5000)")  
+    parser.add_argument("--thin", type=int, default=40, help="HLDA thinning interval (default: 40)")
     args = parser.parse_args()
+
+    # Update HLDA parameters with CLI arguments
+    HLDA_PARAMS.update({
+        'n_loops': args.n_loops,
+        'burn_in': args.burn_in,
+        'thin': args.thin
+    })
 
     print(f"🚀 Starting model evaluation...")
     print(f"Dataset: {args.dataset}")
     print(f"Output directory: {args.output_dir}")
     print(f"Extra topics: {args.n_extra_topics}")
+    print(f"HLDA parameters: {args.n_loops} loops, {args.burn_in} burn-in, {args.thin} thin")
     print()
 
     output_dir = Path(args.output_dir)
@@ -1430,253 +1419,274 @@ def main():
         d["theta"] = theta_renamed
         topic_mappings[m] = topic_mapping
 
-##    # 4) Geweke histograms for HLDA (A and D chains)
-##    print("4) Generating Geweke histograms for HLDA...")
-##    if "HLDA" in models:
-##        hlda_plots_dir = output_dir / "HLDA" / "plots"
-##        hlda_plots_dir.mkdir(parents=True, exist_ok=True)
-##        beta = models["HLDA"]["beta"]
-##        theta = models["HLDA"]["theta"]
-##        n_genes, n_topics = beta.shape
-##        n_cells = theta.shape[0]
-##        # Calculate n_save based on actual parameters used in HLDA run
-##        n_loops = HLDA_PARAMS['n_loops']
-##        burn_in = HLDA_PARAMS['burn_in']
-##        thin = HLDA_PARAMS['thin']
-##        n_save = (n_loops - burn_in) // thin
-##        sample_root = output_dir / "HLDA" / "samples"
-##        if not sample_root.exists():
-##            sample_root = output_dir / "HLDA"
-##        try:
-##            plot_geweke_histograms(
-##                sample_root=sample_root,
-##                keys=["A", "D"],
-##                out_dir=hlda_plots_dir,
-##                n_save=n_save,
-##                n_cells=n_cells,
-##                n_genes=n_genes,
-##                n_topics=n_topics
-##            )
-##        except Exception as e:
-##            pass
-##
-##    # 6) SSE evaluation with custom topic order on held-out test set
-##    print("6) Running SSE evaluation on test set...")
-##    
-##    # Use the provided test_df (no need to create train/test split)
-##    # Extract full cell type identities from cell names using the global function
-##    test_identities = pd.Series([extract_cell_identity(i) for i in test_df.index], index=test_df.index)
-##    
-##    all_sse_results = []
-##    for m, d in models.items():
-##        print(f"   - Running SSE for {m} model...")
-##        model_plots_dir = output_dir / m / "plots"
-##        model_plots_dir.mkdir(parents=True, exist_ok=True)
-##        beta = d["beta"]
-##        
-##        sse_df = incremental_sse_custom(
-##            test_df,
-##            beta,
-##            test_identities,
-##            extra_topics,
-##            theta_out=model_plots_dir / f"{m}_test_theta_nnls.csv"
-##        )
-##        sse_df.to_csv(model_plots_dir / f"{m}_test_sse.csv", index=False)
-##        
-##        # Add model column and collect for summary
-##        sse_df['model'] = m
-##        all_sse_results.append(sse_df)
-##    
-##    # Combine all SSE results
-##    if all_sse_results:
-##        combined_sse_df = pd.concat(all_sse_results, ignore_index=True)
-##        combined_sse_df.to_csv(output_dir / "sse_summary.csv", index=False)
-##    else:
-##        combined_sse_df = pd.DataFrame()
-##
-##    # 7) Extract top genes per topic for each model
-##    print("7) Extracting top genes per topic...")
-##    for m, d in models.items():
-##        model_plots_dir = output_dir / m / "plots"
-##        model_plots_dir.mkdir(parents=True, exist_ok=True)
-##        beta = d["beta"]
-##        
-##        top_genes_df = extract_top_genes_per_topic(beta, n_top_genes=10)
-##        top_genes_df.to_csv(model_plots_dir / f"{m}_top_genes_per_topic.csv")
-##
-##    # 8) Plot true vs estimated similarity
-##    print("8) Generating true vs estimated similarity plots...")
-##    true_beta = create_true_beta_from_counts(counts_df, identity_topics)
-##    for m, d in models.items():
-##        model_plots_dir = output_dir / m / "plots"
-##        model_plots_dir.mkdir(parents=True, exist_ok=True)
-##        beta = d["beta"]
-##        out_png = model_plots_dir / f"{m}_true_vs_estimated_similarity.png"
-##        plot_true_vs_estimated_similarity(true_beta, beta, m, out_png)
-##
-##    # 9) Plot true identity self-similarity
-##    print("9) Generating true identity self-similarity plot...")
-##    common_plots_dir = output_dir / "plots"
-##    common_plots_dir.mkdir(parents=True, exist_ok=True)
-##    out_png = common_plots_dir / "true_identity_self_similarity.png"
-##    plot_true_self_similarity(true_beta, out_png)
-##
-##    # Memory cleanup 
-##    gc.collect()
-##
-##    # 10) Plot UMAP with Scanpy clustering (train data)
-##    print("10) Generating UMAP plots for train data...")
-##    activity_topics = [f"V{i+1}" for i in range(args.n_extra_topics)]
-##    model_plots_dir = output_dir / "UMAP"
-##    model_plots_dir.mkdir(parents=True, exist_ok=True)
-##
-##    # Compute UMAP once for train data
-##    cell_identities = pd.Series([extract_cell_identity(i) for i in counts_df.index], index=counts_df.index)
-##    import scanpy as sc
-##    import anndata as ad
-##    adata = ad.AnnData(X=counts_df.values.astype(np.float32),  # Use float32 instead of float64
-##                       obs=pd.DataFrame(index=counts_df.index),
-##                       var=pd.DataFrame(index=counts_df.columns))
-##    adata.obs['cell_type'] = cell_identities.values
-##    sc.pp.normalize_total(adata, target_sum=1e4)
-##    sc.pp.log1p(adata)
-##    n_pcs = min(50, min(adata.n_vars, adata.n_obs) - 1)
-##    sc.tl.pca(adata, svd_solver='arpack', n_comps=n_pcs)
-##    n_neighbors = min(10, adata.n_obs - 1)
-##    sc.pp.neighbors(adata, n_neighbors=n_neighbors, n_pcs=min(30, n_pcs))
-##    sc.tl.umap(adata, random_state=42)
-##    sc.tl.leiden(adata, resolution=0.5)
-##
-##    # Add theta usage for each model
-##    for model_key in ["HLDA", "LDA", "NMF"]:
-##        if model_key in models:
-##            theta = models[model_key]["theta"]
-##            # Only use activity topics that exist in theta
-##            activity_cols = [col for col in activity_topics if col in theta.columns]
-##            if activity_cols:
-##                # Handle duplicate indices by mapping cell types to theta usage
-##                theta_usage = theta[activity_cols].sum(axis=1)
-##                # Create mapping from cell type to average theta usage (for duplicates)
-##                usage_by_type = theta_usage.groupby(theta_usage.index).mean()
-##                # Map each cell to its cell type's theta usage using vectorized operations
-##                cell_types = pd.Series([extract_cell_identity(cell_id) for cell_id in adata.obs.index], 
-##                                      index=adata.obs.index)
-##                adata.obs[f'{model_key}_theta_usage'] = cell_types.map(usage_by_type).fillna(0.0)
-##            else:
-##                adata.obs[f'{model_key}_theta_usage'] = 0
-##
-##    # Plot UMAPs
-##    sc.pl.umap(adata, color='leiden', show=False, title='Scanpy Clusters', size=15, save=None)
-##    plt.savefig(model_plots_dir / 'umap_leiden.png', dpi=200, bbox_inches='tight')
-##    plt.close()
-##    sc.pl.umap(adata, color='cell_type', show=False, title='Cell Type', size=15, save=None)
-##    plt.savefig(model_plots_dir / 'umap_cell_type.png', dpi=200, bbox_inches='tight')
-##    plt.close()
-##    for model_key in ["HLDA", "LDA", "NMF"]:
-##        if f'{model_key}_theta_usage' in adata.obs:
-##            sc.pl.umap(adata, color=f'{model_key}_theta_usage', show=False, title=f'{model_key} Activity Usage', size=15, save=None)
-##            plt.savefig(model_plots_dir / f'umap_{model_key.lower()}_theta_usage.png', dpi=200, bbox_inches='tight')
-##            plt.close()
-##    
-##    # Memory cleanup before combined UMAP
-##    gc.collect()
-##    
-##    print("   - Creating combined theta usage UMAP for train data...")
-##    # Create combined theta usage UMAP (train data)
-##    train_theta_dfs = {}
-##    for model_key in ["HLDA", "LDA", "NMF"]:
-##        if model_key in models:
-##            train_theta_dfs[model_key] = models[model_key]["theta"]
-##    
-##    if train_theta_dfs:
-##        plot_combined_theta_usage_umaps(counts_df, cell_identities, train_theta_dfs, 
-##                                       activity_topics, output_dir / 'plots', suffix="_train")
-##    
-##    # Memory cleanup after combined UMAP
-##    del train_theta_dfs
-##    del adata  # Clean up main adata object
-##    gc.collect()
-##
-##    print("   - Processing test data for UMAP...")
-##    # Repeat for test data
-##    test_identities = pd.Series([extract_cell_identity(i) for i in test_df.index], index=test_df.index)
-##    adata_test = ad.AnnData(X=test_df.values.astype(np.float32),  # Use float32 for memory efficiency
-##                            obs=pd.DataFrame(index=test_df.index),
-##                            var=pd.DataFrame(index=test_df.columns))
-##    adata_test.obs['cell_type'] = test_identities.values
-##    sc.pp.normalize_total(adata_test, target_sum=1e4)
-##    sc.pp.log1p(adata_test)
-##    n_pcs = min(50, min(adata_test.n_vars, adata_test.n_obs) - 1)
-##    sc.tl.pca(adata_test, svd_solver='arpack', n_comps=n_pcs)
-##    n_neighbors = min(10, adata_test.n_obs - 1)
-##    sc.pp.neighbors(adata_test, n_neighbors=n_neighbors, n_pcs=min(30, n_pcs))
-##    sc.tl.umap(adata_test, random_state=42)
-##    sc.tl.leiden(adata_test, resolution=0.5)
-##    for model_key in ["HLDA", "LDA", "NMF"]:
-##        if model_key in models:
-##            beta = models[model_key]["beta"]
-##            theta_test = get_or_estimate_test_theta(test_df, beta, model_key, output_dir)
-##            activity_cols = [col for col in activity_topics if col in theta_test.columns]
-##            if activity_cols:
-##                # Handle potential duplicate indices by mapping cell types to theta usage
-##                theta_usage = theta_test[activity_cols].sum(axis=1)
-##                # For test data, theta_test should have same index as test_df (no duplicates expected)
-##                # But use safe mapping approach anyway
-##                if theta_usage.index.has_duplicates:
-##                    usage_by_type = theta_usage.groupby(theta_usage.index).mean()
-##                    cell_types = pd.Series([extract_cell_identity(cell_id) for cell_id in adata_test.obs.index], 
-##                                          index=adata_test.obs.index)
-##                    adata_test.obs[f'{model_key}_theta_usage'] = cell_types.map(usage_by_type).fillna(0.0)
-##                else:
-##                    # No duplicates, safe to reindex
-##                    adata_test.obs[f'{model_key}_theta_usage'] = theta_usage.reindex(adata_test.obs.index).fillna(0).values
-##            else:
-##                adata_test.obs[f'{model_key}_theta_usage'] = 0
-##    sc.pl.umap(adata_test, color='leiden', show=False, title='Scanpy Clusters', size=15, save=None)
-##    plt.savefig(model_plots_dir / 'umap_leiden_test.png', dpi=200, bbox_inches='tight')
-##    plt.close()
-##    sc.pl.umap(adata_test, color='cell_type', show=False, title='Cell Type', size=15, save=None)
-##    plt.savefig(model_plots_dir / 'umap_cell_type_test.png', dpi=200, bbox_inches='tight')
-##    plt.close()
-##    for model_key in ["HLDA", "LDA", "NMF"]:
-##        if f'{model_key}_theta_usage' in adata_test.obs:
-##            sc.pl.umap(adata_test, color=f'{model_key}_theta_usage', show=False, title=f'{model_key} Activity Usage', size=15, save=None)
-##            plt.savefig(model_plots_dir / f'umap_{model_key.lower()}_theta_usage_test.png', dpi=200, bbox_inches='tight')
-##            plt.close()
-##    
-##    print("   - Creating combined theta usage UMAP for test data...")
-##    # Create combined theta usage UMAP (test data)
-##    test_theta_dfs = {}
-##    for m, d in models.items():
-##        # Get test theta for this model
-##        beta = d["beta"]
-##        theta_test_df = get_or_estimate_test_theta(test_df, beta, m, output_dir)
-##        test_theta_dfs[m] = theta_test_df
-##    
-##    if test_theta_dfs:
-##        plot_combined_theta_usage_umaps(test_df, test_identities, test_theta_dfs, 
-##                                       activity_topics, output_dir / 'plots', suffix="_test")
-##    
-##    # Memory cleanup
-##    del test_theta_dfs
-##    del adata_test
-##    gc.collect()
+    # --- Cache for test theta DataFrames ---
+    test_theta_dfs = {}
+
+    # Helper to get or cache test theta
+    def get_test_theta_cached(model_key, test_df, beta, output_dir):
+        if model_key in test_theta_dfs:
+            return test_theta_dfs[model_key]
+        theta = get_or_estimate_test_theta(test_df, beta, model_key, output_dir)
+        test_theta_dfs[model_key] = theta
+        return theta
+
+   # 4) Geweke histograms for HLDA (A and D chains)
+    print("4) Generating Geweke histograms for HLDA...")
+    if "HLDA" in models:
+       hlda_plots_dir = output_dir / "HLDA" / "plots"
+       hlda_plots_dir.mkdir(parents=True, exist_ok=True)
+       beta = models["HLDA"]["beta"]
+       theta = models["HLDA"]["theta"]
+       n_genes, n_topics = beta.shape
+       n_cells = theta.shape[0]
+       # Calculate n_save based on actual parameters used in HLDA run
+       n_loops = HLDA_PARAMS['n_loops']
+       burn_in = HLDA_PARAMS['burn_in']
+       thin = HLDA_PARAMS['thin']
+       n_save = (n_loops - burn_in) // thin
+       sample_root = output_dir / "HLDA" / "samples"
+       if not sample_root.exists():
+           sample_root = output_dir / "HLDA"
+       try:
+           plot_geweke_histograms(
+               sample_root=sample_root,
+               keys=["A", "D"],
+               out_dir=hlda_plots_dir,
+               n_save=n_save,
+               n_cells=n_cells,
+               n_genes=n_genes,
+               n_topics=n_topics
+           )
+       except Exception as e:
+           pass
+
+   # 6) SSE evaluation with custom topic order on held-out test set
+    print("6) Running SSE evaluation on test set...")
+   
+   # Use the provided test_df (no need to create train/test split)
+   # Extract full cell type identities from cell names using the global function
+    test_identities = pd.Series([extract_cell_identity(i) for i in test_df.index], index=test_df.index)
+   
+    all_sse_results = []
+    for m, d in models.items():
+       print(f"   - Running SSE for {m} model...")
+       model_plots_dir = output_dir / m / "plots"
+       model_plots_dir.mkdir(parents=True, exist_ok=True)
+       beta = d["beta"]
+       
+       # Use cached test theta and write to disk (get_or_estimate_test_theta always writes)
+       theta_test = get_test_theta_cached(m, test_df, beta, output_dir)
+       # (No need to write again, function already writes)
+       
+       sse_df = incremental_sse_custom(
+           test_df,
+           beta,
+           test_identities,
+           extra_topics,
+           theta_out=output_dir / "model_comparison" / f"{m}_test_theta_nnls.csv"
+       )
+       sse_df.to_csv(model_plots_dir / f"{m}_test_sse.csv", index=False)
+       
+       # Add model column and collect for summary
+       sse_df['model'] = m
+       all_sse_results.append(sse_df)
+   
+   # Combine all SSE results
+    if all_sse_results:
+       combined_sse_df = pd.concat(all_sse_results, ignore_index=True)
+       combined_sse_df.to_csv(output_dir / "sse_summary.csv", index=False)
+    else:
+       combined_sse_df = pd.DataFrame()
+
+   # 7) Extract top genes per topic for each model
+    print("7) Extracting top genes per topic...")
+    for m, d in models.items():
+       model_plots_dir = output_dir / m / "plots"
+       model_plots_dir.mkdir(parents=True, exist_ok=True)
+       beta = d["beta"]
+       
+       top_genes_df = extract_top_genes_per_topic(beta, n_top_genes=10)
+       top_genes_df.to_csv(model_plots_dir / f"{m}_top_genes_per_topic.csv")
+
+   # 8) Plot true vs estimated similarity
+    print("8) Generating true vs estimated similarity plots...")
+    true_beta = create_true_beta_from_counts(counts_df, identity_topics)
+    for m, d in models.items():
+        model_plots_dir = output_dir / m / "plots"
+        model_plots_dir.mkdir(parents=True, exist_ok=True)
+        beta = d["beta"]
+        out_png = model_plots_dir / f"{m}_true_vs_estimated_similarity.png"
+        # Print first few index values for debugging
+        print(f"      [DEBUG] First 5 indices of true_beta: {list(true_beta.index[:5])}")
+        print(f"      [DEBUG] First 5 indices of estimated_beta: {list(beta.index[:5])}")
+        plot_true_vs_estimated_similarity(true_beta, beta, m, out_png)
+
+   # 9) Plot true identity self-similarity
+    print("9) Generating true identity self-similarity plot...")
+    common_plots_dir = output_dir / "model_comparison"
+    common_plots_dir.mkdir(parents=True, exist_ok=True)
+    out_png = common_plots_dir / "true_identity_self_similarity.png"
+    plot_true_self_similarity(true_beta, out_png)
+
+   # Memory cleanup 
+    gc.collect()
+
+   # 10) Plot UMAP with Scanpy clustering (train data)
+    print("10) Generating UMAP plots for train data...")
+    activity_topics = [f"V{i+1}" for i in range(args.n_extra_topics)]
+    model_plots_dir = output_dir / "UMAP"
+    model_plots_dir.mkdir(parents=True, exist_ok=True)
+
+    # Compute UMAP once for train data
+    cell_identities = pd.Series([extract_cell_identity(i) for i in counts_df.index], index=counts_df.index)
+    import scanpy as sc
+    import anndata as ad
+    adata = ad.AnnData(X=counts_df.values.astype(np.float32),  # Use float32 instead of float64
+                      obs=pd.DataFrame(index=counts_df.index),
+                      var=pd.DataFrame(index=counts_df.columns))
+    adata.obs['cell_type'] = cell_identities.values
+    sc.pp.normalize_total(adata, target_sum=1e4)
+    sc.pp.log1p(adata)
+    n_pcs = min(50, min(adata.n_vars, adata.n_obs) - 1)
+    sc.tl.pca(adata, svd_solver='arpack', n_comps=n_pcs)
+    n_neighbors = min(10, adata.n_obs - 1)
+    sc.pp.neighbors(adata, n_neighbors=n_neighbors, n_pcs=min(30, n_pcs))
+    sc.tl.umap(adata, random_state=42)
+    sc.tl.leiden(adata, resolution=0.5)
+    sc.tl.umap(adata, random_state=42)
+
+    # Add theta usage for each model
+    for model_key in ["HLDA", "LDA", "NMF"]:
+        if model_key in models:
+            theta = models[model_key]["theta"]
+            # Only use activity topics that exist in theta
+            activity_cols = [col for col in activity_topics if col in theta.columns]
+            if activity_cols:
+                # Simple sum of activity topics, ensuring index alignment
+                theta_usage = theta[activity_cols].sum(axis=1)
+                # Ensure the theta_usage has the same index as adata.obs
+                if theta_usage.index.equals(adata.obs.index):
+                    adata.obs[f'{model_key}_theta_usage'] = theta_usage.values
+                else:
+                    # Reindex if needed (should be rare for train data)
+                    adata.obs[f'{model_key}_theta_usage'] = theta_usage.reindex(adata.obs.index).fillna(0).values
+                # Debug output
+                print(f"      {model_key} train theta usage: {activity_cols} -> range [{theta_usage.min():.3f}, {theta_usage.max():.3f}], mean {theta_usage.mean():.3f}")
+            else:
+                adata.obs[f'{model_key}_theta_usage'] = 0
+                print(f"      {model_key} train theta usage: no activity topics found")
+
+    # Plot UMAPs
+    sc.pl.umap(adata, color='leiden', show=False, title='Scanpy Clusters', size=15, save=None)
+    plt.savefig(model_plots_dir / 'umap_leiden.png', dpi=200, bbox_inches='tight')
+    plt.close()
+    sc.pl.umap(adata, color='cell_type', show=False, title='Cell Type', size=15, save=None)
+    plt.savefig(model_plots_dir / 'umap_cell_type.png', dpi=200, bbox_inches='tight')
+    plt.close()
+    for model_key in ["HLDA", "LDA", "NMF"]:
+        if f'{model_key}_theta_usage' in adata.obs:
+            sc.pl.umap(adata, color=f'{model_key}_theta_usage', show=False, title=f'{model_key} Activity Usage', size=15, save=None)
+            plt.savefig(model_plots_dir / f'umap_{model_key.lower()}_theta_usage.png', dpi=200, bbox_inches='tight')
+            plt.close()
+    
+    # Memory cleanup before combined UMAP
+    gc.collect()
+    
+    print("   - Creating combined theta usage UMAP for train data...")
+    # Create combined theta usage UMAP (train data)
+    train_theta_dfs = {}
+    for model_key in ["HLDA", "LDA", "NMF"]:
+        if model_key in models:
+            train_theta_dfs[model_key] = models[model_key]["theta"]
+    
+    if train_theta_dfs:
+        plot_combined_theta_usage_umaps(counts_df, cell_identities, train_theta_dfs, 
+                                       activity_topics, output_dir / 'model_comparison', suffix="_train")
+    
+    # Memory cleanup after combined UMAP
+    del train_theta_dfs
+    del adata  # Clean up main adata object
+    gc.collect()
+
+    print("   - Processing test data for UMAP...")
+    # Repeat for test data
+    test_identities = pd.Series([extract_cell_identity(i) for i in test_df.index], index=test_df.index)
+    adata_test = ad.AnnData(X=test_df.values.astype(np.float32),  # Use float32 for memory efficiency
+                            obs=pd.DataFrame(index=test_df.index),
+                            var=pd.DataFrame(index=test_df.columns))
+    adata_test.obs['cell_type'] = test_identities.values
+    sc.pp.normalize_total(adata_test, target_sum=1e4)
+    sc.pp.log1p(adata_test)
+    n_pcs = min(50, min(adata_test.n_vars, adata_test.n_obs) - 1)
+    sc.tl.pca(adata_test, svd_solver='arpack', n_comps=n_pcs)
+    n_neighbors = min(10, adata_test.n_obs - 1)
+    sc.pp.neighbors(adata_test, n_neighbors=n_neighbors, n_pcs=min(30, n_pcs))
+    sc.tl.umap(adata_test, random_state=42)
+    sc.tl.leiden(adata_test, resolution=0.5)
+    for model_key in ["HLDA", "LDA", "NMF"]:
+        if model_key in models:
+            beta = models[model_key]["beta"]
+            # Use cached test theta for consistency
+            theta_test = get_test_theta_cached(model_key, test_df, beta, output_dir)
+            activity_cols = [col for col in activity_topics if col in theta_test.columns]
+            if activity_cols:
+                # Simple sum of activity topics, ensuring index alignment
+                theta_usage = theta_test[activity_cols].sum(axis=1)
+                # Ensure the theta_usage has the same index as adata_test.obs
+                if theta_usage.index.equals(adata_test.obs.index):
+                    adata_test.obs[f'{model_key}_theta_usage'] = theta_usage.values
+                else:
+                    # Reindex if needed (should be rare for test data)
+                    adata_test.obs[f'{model_key}_theta_usage'] = theta_usage.reindex(adata_test.obs.index).fillna(0).values
+                # Debug output
+                print(f"      {model_key} test theta usage: {activity_cols} -> range [{theta_usage.min():.3f}, {theta_usage.max():.3f}], mean {theta_usage.mean():.3f}")
+            else:
+                adata_test.obs[f'{model_key}_theta_usage'] = 0
+                print(f"      {model_key} test theta usage: no activity topics found")
+    sc.pl.umap(adata_test, color='leiden', show=False, title='Scanpy Clusters', size=15, save=None)
+    plt.savefig(model_plots_dir / 'umap_leiden_test.png', dpi=200, bbox_inches='tight')
+    plt.close()
+    sc.pl.umap(adata_test, color='cell_type', show=False, title='Cell Type', size=15, save=None)
+    plt.savefig(model_plots_dir / 'umap_cell_type_test.png', dpi=200, bbox_inches='tight')
+    plt.close()
+    for model_key in ["HLDA", "LDA", "NMF"]:
+        if f'{model_key}_theta_usage' in adata_test.obs:
+            sc.pl.umap(adata_test, color=f'{model_key}_theta_usage', show=False, title=f'{model_key} Activity Usage', size=15, save=None)
+            plt.savefig(model_plots_dir / f'umap_{model_key.lower()}_theta_usage_test.png', dpi=200, bbox_inches='tight')
+            plt.close()
+    
+    print("   - Creating combined theta usage UMAP for test data...")
+    # Create combined theta usage UMAP (test data)
+    test_theta_dfs_combined = {}
+    for m, d in models.items():
+        beta = d["beta"]
+        theta_test_df = get_test_theta_cached(m, test_df, beta, output_dir)
+        test_theta_dfs_combined[m] = theta_test_df
+    
+    if test_theta_dfs_combined:
+        plot_combined_theta_usage_umaps(test_df, test_identities, test_theta_dfs_combined, 
+                                       activity_topics, output_dir / 'model_comparison', suffix="_test")
+    
+    # Memory cleanup
+    del test_theta_dfs_combined
+    del adata_test
+    gc.collect()
 
     # 11) Plot UMAP with Scanpy clustering (test data)
-##    print("11) Generating individual UMAP plots for test data by model...")
-##    test_identities = pd.Series([extract_cell_identity(i) for i in test_df.index], index=test_df.index)
-##    
-##    for m, d in models.items():
-##        print(f"   - Generating UMAP for {m} test data...")
-##        model_plots_dir = output_dir / m / "plots"
-##        model_plots_dir.mkdir(parents=True, exist_ok=True)
-##        beta = d["beta"]
-##        
-##        # Get test theta for this model
-##        theta_test_df = get_or_estimate_test_theta(test_df, beta, m, output_dir)
-##        
-##        # New Scanpy UMAP clustering for test data
-##        plot_umap_scanpy_clustering(test_df, test_identities, f"{m}_test", theta_test_df, activity_topics, model_plots_dir)
+    print("11) Generating individual UMAP plots for test data by model...")
+    test_identities = pd.Series([extract_cell_identity(i) for i in test_df.index], index=test_df.index)
+    
+    for m, d in models.items():
+        print(f"   - Generating UMAP for {m} test data...")
+        model_plots_dir = output_dir / m / "plots"
+        model_plots_dir.mkdir(parents=True, exist_ok=True)
+        beta = d["beta"]
+        
+        # Use cached test theta
+        theta_test_df = get_test_theta_cached(m, test_df, beta, output_dir)
+        
+        # New Scanpy UMAP clustering for test data
+        plot_umap_scanpy_clustering(test_df, test_identities, f"{m}_test", theta_test_df, activity_topics, model_plots_dir)
 
     print('generating theta heatmaps')
     
@@ -1696,25 +1706,29 @@ def main():
         model_plots_dir.mkdir(parents=True, exist_ok=True)
         out_png = model_plots_dir / f"{m}_theta_heatmap.png"
 
+        # Extract cell identities from theta index (handle both real data and simulation data)
+        cell_identities_from_theta = pd.Series([extract_cell_identity(i) for i in d['theta'].index], index=d['theta'].index)
+
         # Create meta-cells for this specific model in its own directory
         model_temp_dir = output_dir / m / "temp"
         meta_file = create_meta_cells_chunked(
             theta=d['theta'], 
-            cell_identities=d['theta'].index, 
+            cell_identities=cell_identities_from_theta, 
             cells_per_group=3, 
             temp_dir=model_temp_dir,
             model_name=m
         )
         
-        # model_temp_dir / f"{m}_meta_cells.csv"
-        
-        
-        
         # Read the model-specific meta-cells file
-        meta_theta = pd.read_csv(meta_file, index_col=0)
+        meta_theta = pd.read_csv(meta_file)
+        # Use the 'cell_type' column for cell_identities if present
+        if 'cell_type' in meta_theta.columns:
+            cell_identities = meta_theta['cell_type']
+        else:
+            cell_identities = None
         plot_theta_heatmap(
             theta=meta_theta, 
-            cell_identities=meta_theta.index, 
+            cell_identities=cell_identities, 
             model_name=m, 
             out_png=out_png, 
             identity_topics=identity_topics, 
@@ -1734,7 +1748,7 @@ def main():
     # # 14) Plot cumulative SSE lineplot
     # print("14) Generating cumulative SSE lineplot...")
     # activity_topics = [f"V{i+1}" for i in range(args.n_extra_topics)]
-    # plot_cumulative_sse_lineplot(combined_sse_df, identity_topics, activity_topics, output_dir / 'plots')
+    # plot_cumulative_sse_lineplot(combined_sse_df, identity_topics, activity_topics, output_dir / 'model_comparison')
     
     # # Final memory cleanup
     # gc.collect()

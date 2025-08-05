@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import sys
 import os
+import re
 
 # Add the simulation directory to the path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -25,6 +26,14 @@ from simulation_evaluation_functions import (
 )
 # Import noise analysis function from shared directory
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'shared'))
+
+def get_simulation_cell_identities(index):
+    # If all cell names match the pattern 'X_N', extract the prefix
+    if all(re.match(r".+_\d+$", str(i)) for i in index):
+        return pd.Series(index).str.split('_').str[0]
+    else:
+        # Fallback: return as-is (for real data)
+        return pd.Series(index)
 
 def generate_noise_analysis(simulation_dir, output_dir, libsize_mean=1500, n_identity_topics=2):
     """
@@ -211,11 +220,8 @@ def run_combined_evaluation(simulation_dir, output_dir, models=['HLDA', 'LDA', '
     if not estimated_theta_paths:
         raise ValueError("No estimated theta/beta files found")
     
-    # Generate combined theta scatter plot with topic matching
-    if topic_config and not str(output_dir).endswith(topic_config):
-        combined_output_path = output_dir / topic_config / "model_comparison" / "combined_theta_scatter.png"
-    else:
-        combined_output_path = output_dir / "model_comparison" / "combined_theta_scatter.png"
+    # Generate combined theta scatter plot with topic matching (TRAIN)
+    combined_output_path = output_dir / "model_comparison" / "combined_theta_scatter.png"
     combined_output_path.parent.mkdir(parents=True, exist_ok=True)
     
     combine_theta_scatter_plots(
@@ -226,12 +232,34 @@ def run_combined_evaluation(simulation_dir, output_dir, models=['HLDA', 'LDA', '
         true_beta_path,
         estimated_beta_paths
     )
+
+    # Generate combined theta scatter plot for TEST data (using nnls test theta files)
+    test_theta_paths = []
+    for model in models:
+        # Look for test theta files in the model_comparison directory (outer layer)
+        if topic_config and not str(output_dir).endswith(topic_config):
+            test_theta_path = output_dir / topic_config / "model_comparison" / f"{model}_test_theta_nnls.csv"
+        else:
+            test_theta_path = output_dir / "model_comparison" / f"{model}_test_theta_nnls.csv"
+        if test_theta_path.exists():
+            test_theta_paths.append(test_theta_path)
+        else:
+            print(f"Warning: Test theta file not found for {model}: {test_theta_path}")
+    if test_theta_paths:
+        combined_test_output_path = output_dir / "model_comparison" / "combined_theta_scatter_test.png"
+        combine_theta_scatter_plots(
+            true_theta_path,
+            test_theta_paths,
+            method_names,
+            combined_test_output_path,
+            true_beta_path,
+            estimated_beta_paths
+        )
+    else:
+        print("No test theta files found for combined test scatter plot.")
     
     # Generate combined beta scatter plot
-    if topic_config and not str(output_dir).endswith(topic_config):
-        combined_beta_output_path = output_dir / topic_config / "model_comparison" / "combined_beta_scatter.png"
-    else:
-        combined_beta_output_path = output_dir / "model_comparison" / "combined_beta_scatter.png"
+    combined_beta_output_path = output_dir / "model_comparison" / "combined_beta_scatter.png"
     combined_beta_output_path.parent.mkdir(parents=True, exist_ok=True)
     
     combine_beta_scatter_plots(
@@ -242,16 +270,18 @@ def run_combined_evaluation(simulation_dir, output_dir, models=['HLDA', 'LDA', '
     )
     
     # Generate noise analysis using true parameters (save to estimates folder)
-    if topic_config and not str(output_dir).endswith(topic_config):
-        noise_output_dir = output_dir / topic_config / "model_comparison"
-    else:
-        noise_output_dir = output_dir / "model_comparison"
-    generate_noise_analysis(simulation_dir, noise_output_dir, libsize_mean, n_identity_topics)
+    # if topic_config and not str(output_dir).endswith(topic_config):
+    #     noise_output_dir = output_dir / topic_config / "model_comparison"
+    # else:
+    #     noise_output_dir = output_dir / "model_comparison"
+    # generate_noise_analysis(simulation_dir, noise_output_dir, libsize_mean, n_identity_topics)
+    # print(f"- Noise analysis: {noise_output_dir}")
+    # TODO: Signal/noise analysis is currently disabled; revisit and fix for multiple activity topics.
     
     print(f"Combined evaluation complete!")
     print(f"- Combined theta scatter plot: {combined_output_path}")
     print(f"- Combined beta scatter plot: {combined_beta_output_path}")
-    print(f"- Noise analysis: {noise_output_dir}")
+    # print(f"- Noise analysis: {noise_output_dir}") # This line is commented out as per the edit hint
 
 def main():
     parser = argparse.ArgumentParser(description="Run combined simulation evaluation")

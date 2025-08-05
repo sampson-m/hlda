@@ -167,18 +167,31 @@ def simulate_counts(
         rng.shuffle(activity_flags)
 
         for c in range(n_cells_total):
-            # Use unique cell names to avoid pandas memory issues
             cell_name = f"{idt}_{c+1}"
 
+            theta_full = np.zeros(n_topics)
             if activity_flags[c]:
-                alpha = [alpha_identity] + alpha_activitys
+                # Randomly select activity topic(s): V1 only, V2 only, or both
+                activity_case = rng.integers(0, 3)  # 0: V1 only, 1: V2 only, 2: both
+                # Always include the identity
+                alpha = [alpha_identity]
+                topic_indices = [id_idx]
+                if activity_case == 0:
+                    # V1 only
+                    alpha.append(alpha_activitys[0])
+                    topic_indices.append(n_id + 0)
+                elif activity_case == 1:
+                    # V2 only
+                    alpha.append(alpha_activitys[1])
+                    topic_indices.append(n_id + 1)
+                else:
+                    # Both V1 and V2
+                    alpha.extend([alpha_activitys[0], alpha_activitys[1]])
+                    topic_indices.extend([n_id + 0, n_id + 1])
                 theta_sub = rng.dirichlet(alpha)
-                theta_full = np.zeros(n_topics)
-                theta_full[id_idx] = theta_sub[0]
-                for act_j in range(n_act):
-                    theta_full[n_id + act_j] = theta_sub[act_j + 1]
+                for i, idx in enumerate(topic_indices):
+                    theta_full[idx] = theta_sub[i]
             else:
-                theta_full = np.zeros(n_topics)
                 theta_full[id_idx] = 1.0
 
             lib_size = libsize_mean if libsize_sd == 0 else max(1, int(rng.normal(libsize_mean, libsize_sd)))

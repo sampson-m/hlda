@@ -54,3 +54,10 @@ AB_V1:
   identities:
     - A
     - B
+
+ABCD_V1V2:
+  identities:
+    - A
+    - B
+    - C
+    - D

@@ -22,11 +22,13 @@ from shared.evaluate_models import (
     plot_cumulative_sse_lineplot, 
     plot_theta_heatmap,
     estimate_theta_simplex,
-    stack_heatmaps_vertically,
     prepare_model_topics,
-    determine_reference_ordering
+    extract_cell_identity
 )
 from shared.analyze_all_fits import plot_combined_cumulative_sse_lineplot
+
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
 
 
 def get_identity_topics_from_config(dataset: str, config_file: str) -> list:
@@ -116,9 +118,16 @@ def process_individual_visualizations(base_dirs: list, datasets: list, config_fi
                 
                 # Load train and test data
                 if dataset == "pbmc":
-                    train_csv = config_dir.parent / "filtered_counts_train.csv"
-                    test_csv = config_dir.parent / "filtered_counts_test.csv"
+                    train_csv = Path("data/pbmc/filtered_counts_train.csv")
+                    test_csv = Path("data/pbmc/filtered_counts_test.csv")
+                elif dataset == "glioma":
+                    train_csv = Path("data/glioma/glioma_counts_train.csv")
+                    test_csv = Path("data/glioma/glioma_counts_test.csv")
+                elif dataset == "cancer":
+                    train_csv = Path("data/cancer/filtered_counts_train.csv")
+                    test_csv = Path("data/cancer/filtered_counts_test.csv")
                 else:
+                    # For simulation data, look in the config directory
                     train_csv = config_dir / "filtered_counts_train.csv"  
                     test_csv = config_dir / "filtered_counts_test.csv"
                 
@@ -145,8 +154,8 @@ def process_individual_visualizations(base_dirs: list, datasets: list, config_fi
                     hlda_beta_renamed, hlda_theta_renamed, _ = prepare_model_topics(
                         "HLDA", hlda_beta, hlda_theta, counts_df, identity_topics, n_extra_topics
                     )
-                    cell_identities = pd.Series([i.split("_")[0] for i in counts_df.index], index=counts_df.index)
-                    reference_ordering = determine_reference_ordering(hlda_theta_renamed, cell_identities, identity_topics, cells_per_group=3)
+                    cell_identities = pd.Series([extract_cell_identity(i) for i in counts_df.index], index=counts_df.index)
+                    reference_ordering = None # Removed determine_reference_ordering
                 
                 for m in models.keys():
                     model_plots_dir = config_dir / m / "plots"
@@ -160,26 +169,26 @@ def process_individual_visualizations(base_dirs: list, datasets: list, config_fi
                     )
                     
                     # Train heatmap
-                    cell_identities = pd.Series([i.split("_")[0] for i in counts_df.index], index=counts_df.index)
+                    cell_identities = pd.Series([extract_cell_identity(i) for i in counts_df.index], index=counts_df.index)
                     
                     out_png = model_plots_dir / f"{m}_theta_heatmap.png"
                     theta_heatmap_paths_train.append(str(out_png))
                     model_names_ordered.append(m)
                     
                     plot_theta_heatmap(theta_renamed, cell_identities, m, out_png, identity_topics, 
-                                      cells_per_group=3, use_consistent_ordering=False, reference_ordering=reference_ordering)
+                                      cells_per_group=3, use_consistent_ordering=False)
                     
                     # Test heatmap
                     X_test_prop = test_df.div(test_df.sum(axis=1), axis=0).values
                     theta_test = estimate_theta_simplex(X_test_prop, beta_renamed.values, l1=0.002)
                     theta_test_df = pd.DataFrame(theta_test, index=test_df.index, columns=beta_renamed.columns)
-                    test_identities = pd.Series([i.split("_")[0] for i in test_df.index], index=test_df.index)
+                    test_identities = pd.Series([extract_cell_identity(i) for i in test_df.index], index=test_df.index)
                     
                     out_png = model_plots_dir / f"{m}_test_theta_heatmap.png"
                     theta_heatmap_paths_test.append(str(out_png))
                     
                     plot_theta_heatmap(theta_test_df, test_identities, f"{m} (test)", out_png, identity_topics, 
-                                      cells_per_group=3, use_consistent_ordering=False, reference_ordering=reference_ordering)
+                                      cells_per_group=3, use_consistent_ordering=False)
                 
                 # Create combined heatmaps
                 combined_dir = config_dir / "plots"
@@ -268,6 +277,74 @@ def process_cross_topic_analysis(base_dirs: list, datasets: list, config_file: s
             except Exception as e:
                 print(f"      Error processing {analysis_dir}: {e}")
                 continue
+
+
+def stack_heatmaps_vertically(heatmap_paths, model_names, output_path):
+    """Stack heatmap images vertically into a single combined image."""
+    if not heatmap_paths:
+        print("    No heatmap paths provided")
+        return
+    
+    # Load images
+    images = []
+    valid_models = []
+    
+    for path, model_name in zip(heatmap_paths, model_names):
+        try:
+            img = mpimg.imread(path)
+            images.append(img)
+            valid_models.append(model_name)
+            print(f"    Loaded heatmap for {model_name}")
+        except Exception as e:
+            print(f"    Error loading {path}: {e}")
+            continue
+    
+    if len(images) == 0:
+        print("    No valid images could be loaded")
+        return
+    
+    # Calculate dimensions
+    heights = [img.shape[0] for img in images]
+    widths = [img.shape[1] for img in images]
+    max_width = max(widths)
+    label_height = 50  # Space for model labels
+    total_height = sum(heights) + label_height * len(images)
+    
+    # Create combined figure
+    fig_width = max_width / 100  # Convert pixels to inches (assuming 100 DPI)
+    fig_height = total_height / 100
+    fig = plt.figure(figsize=(fig_width, fig_height))
+    
+    # Stack images vertically
+    y_offset = 0
+    for i, (img, model_name) in enumerate(zip(images, valid_models)):
+        # Calculate position for this image
+        img_height = heights[i]
+        y_pos = 1.0 - (y_offset + img_height + label_height) / total_height
+        height_frac = img_height / total_height
+        
+        # Add image
+        ax = fig.add_axes((0.0, y_pos, 1.0, height_frac))
+        ax.imshow(img)
+        ax.axis('off')
+        
+        # Add model label above image
+        label_y = 1.0 - (y_offset + label_height/2) / total_height
+        fig.text(0.5, label_y, model_name, ha='center', va='center', 
+                fontsize=18, weight='bold', 
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
+        
+        y_offset += img_height + label_height
+    
+    # Save combined image
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    plt.subplots_adjust(left=0, right=1, top=1, bottom=0, hspace=0, wspace=0)
+    fig.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
+    plt.close(fig)
+    
+    print(f"    ✓ Combined heatmaps saved to: {output_path}")
 
 
 def main():

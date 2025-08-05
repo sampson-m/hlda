@@ -1,215 +1,148 @@
-# HLDA Scripts - Reorganized Structure
+# Scripts Directory - Organized Structure
 
-This directory contains scripts for running Hierarchical Latent Dirichlet Allocation (HLDA), LDA, and NMF models on single-cell RNA-seq data, now organized by dataset and functionality.
+This directory contains all scripts organized by functionality and purpose.
 
-## New Directory Structure
+## 📁 Directory Structure
 
+### `core/` - Core Functions and Utilities
+- **`evaluation.py`** - Core evaluation functions (topic matching, parameter comparison)
+- **`noise_analysis.py`** - Noise analysis and signal-to-noise ratio calculations
+
+### `datasets/` - Dataset-Specific Scripts
+- **`simulation/`** - Simulation dataset scripts
+  - `config.py` - Unified configuration system
+  - `generate_data.py` - Data generation
+  - `run_pipelines.py` - Pipeline execution
+  - `simulate.py` - Main interface
+  - `simulate_counts.py` - Count simulation
+  - `simulation_train_test_split.py` - Train/test splitting
+- **`cancer/`** - Cancer dataset scripts
+- **`glioma/`** - Glioma dataset scripts  
+- **`pbmc/`** - PBMC dataset scripts
+
+### `analysis/` - Analysis and Evaluation Scripts
+- **`organize_noise_analysis.py`** - Organize noise analysis outputs
+- **`cleanup_estimates.py`** - Clean up estimates directory
+- **`run_all_evaluations.sh`** - Run evaluations across all datasets
+- **`run_pipelines.sh`** - Run pipelines for real datasets
+- **`run_visualizations_only.py`** - Generate visualizations
+- **`combined_evaluation.py`** - Combined evaluation functions
+
+### `experiments/` - Experimental and Research Scripts
+- **`simulation/`** - Simulation experiments
+  - `test_hlda_sampling_methods.py` - HLDA sampling experiments
+
+### `shared/` - Shared Model Fitting Scripts (Keep for Dependencies)
+- **`fit_hlda.py`** - HLDA model fitting (numba dependencies)
+- **`fit_lda_nmf.py`** - LDA and NMF model fitting
+- **`evaluate_models.py`** - Model evaluation
+- **`analyze_all_fits.py`** - Analysis of all model fits
+- **`noise.py`** - Noise analysis utilities
+- **`test_signal_noise.py`** - Signal/noise testing
+
+### `legacy/` - Old Scripts (Deprecated)
+- **`simulation/`** - Old simulation shell scripts
+  - `generate_counts_*.sh` - Old data generation scripts
+  - `run_simulation_pipelines*.sh` - Old pipeline scripts
+
+### `simulation/` - **REMOVED** (Moved to legacy)
+- All simulation scripts moved to `scripts/legacy/simulation/`
+- New unified system in `scripts/datasets/simulation/` replaces these
+
+## 🚀 Quick Start
+
+### Simulation Data Generation
+```bash
+# List available datasets
+python3 scripts/datasets/simulation/simulate.py list
+
+# Generate data for a dataset
+python3 scripts/datasets/simulation/simulate.py generate AB_V1
+
+# Run pipeline for a dataset
+python3 scripts/datasets/simulation/simulate.py pipeline ABCD_V1V2
 ```
-scripts/
-├── shared/                    # Core modeling scripts (reusable)
-│   ├── fit_hlda.py           # HLDA Gibbs sampling implementation
-│   ├── fit_lda_nmf.py        # LDA and NMF fitting
-│   ├── evaluate_models.py    # Model evaluation and comparison
-│   └── analyze_all_fits.py   # Cross-configuration analysis
-├── pbmc/                      # PBMC-specific scripts
-│   ├── preprocess_pbmc.py    # PBMC data preprocessing
-│   ├── run_pbmc_pipeline.py  # PBMC pipeline with heldout splits
-│   └── check_library_sizes.py # Utility for checking library sizes
-├── glioma/                    # Glioma-specific scripts
-│   ├── preprocess_glioma.py  # Glioma data preprocessing
-│   ├── run_glioma_pipeline.py # Glioma pipeline with fixed splits
-│   └── inspect_glioma.py     # Utility for inspecting glioma data
-└── run_pipelines.sh          # Single entry point for all pipelines
-```
 
-## Quick Start
-
-### Single Entry Point (Recommended)
-
-Use the unified entry point script from the **root directory**:
-
+### Real Dataset Analysis
 ```bash
 # Run PBMC pipeline
-./scripts/run_pipelines.sh pbmc --input_csv data/pbmc/filtered_counts.csv
+bash scripts/analysis/run_pipelines.sh pbmc --input_csv data/pbmc/filtered_counts.csv
 
 # Run glioma pipeline
-./scripts/run_pipelines.sh glioma --train_csv data/glioma/glioma_counts_train.csv --test_csv data/glioma/glioma_counts_test.csv
-
-# Get help
-./scripts/run_pipelines.sh --help
+bash scripts/analysis/run_pipelines.sh glioma --train_csv data/glioma/train.csv --test_csv data/glioma/test.csv
 ```
 
-### PBMC Pipeline
-
-The PBMC pipeline creates train/test splits with different heldout cell counts and runs models across multiple topic configurations.
-
+### Analysis and Cleanup
 ```bash
-# Basic usage
-./scripts/run_pipelines.sh pbmc --input_csv data/pbmc/filtered_counts.csv
+# Organize noise analysis files
+python3 scripts/analysis/organize_noise_analysis.py
 
-# Custom heldout counts and topic configurations
-./scripts/run_pipelines.sh pbmc \
-    --input_csv data/pbmc/filtered_counts.csv \
-    --heldout_counts "500,1000,1500" \
-    --topic_configs "7,8,9,10" \
-    --base_output_dir estimates/pbmc_custom
+# Clean up estimates directory
+python3 scripts/analysis/cleanup_estimates.py --analyze
+
+# Find duplicate files
+python3 scripts/analysis/cleanup_estimates.py --find-duplicates
 ```
 
-### Glioma Pipeline
+## 📊 Key Improvements
 
-The glioma pipeline uses pre-existing train/test splits and focuses on topic configuration variation.
+### ✅ **Completed**
+1. **Unified Simulation System** - Single interface for all simulation operations
+2. **Organized Dataset Scripts** - Each dataset type has its own directory
+3. **Core Module Extraction** - Common functions moved to core modules
+4. **Noise Analysis Organization** - All noise analysis files properly organized
+5. **Legacy Cleanup** - Old scripts moved to legacy directory
 
-```bash
-# Basic usage
-./scripts/run_pipelines.sh glioma \
-    --train_csv data/glioma/glioma_counts_train.csv \
-    --test_csv data/glioma/glioma_counts_test.csv
+### 🔄 **In Progress**
+1. **Estimates Directory Cleanup** - 23GB of data needs organization
+2. **Core Module Consolidation** - Some functions still need to be moved
+3. **Documentation Updates** - Need to update all import paths
 
-# Custom topic configurations
-./scripts/run_pipelines.sh glioma \
-    --train_csv data/glioma/glioma_counts_train.csv \
-    --test_csv data/glioma/glioma_counts_test.csv \
-    --topic_configs "13,14,15,16,17" \
-    --base_output_dir estimates/glioma_custom
-```
+### 📋 **Next Steps**
+1. **Complete Core Extraction** - Move remaining pure functions to core
+2. **Estimates Cleanup** - Remove duplicates and organize files
+3. **Update Import Paths** - Fix all broken imports after reorganization
+4. **Create Migration Guide** - Help users transition to new structure
 
-## Individual Script Usage
+## 🔧 Dependencies
 
-### Data Preprocessing
+### Core Dependencies (Keep in shared/)
+- **`fit_hlda.py`** - Requires numba for performance
+- **`fit_lda_nmf.py`** - Model-specific fitting logic
+- **`evaluate_models.py`** - Complex evaluation pipeline
 
-#### PBMC Data
-```bash
-cd scripts/pbmc
-python3 preprocess_pbmc.py \
-    --data_dir "../../data/pbmc/raw_10x_data" \
-    --output_dir "../../data/pbmc" \
-    --dataset "pbmc" \
-    --config_file "../../dataset_identities.yaml"
-```
+### Pure Functions (Moved to core/)
+- **`analyze_all_fits.py`** - Pure analysis functions
+- **`noise.py`** - Pure noise analysis utilities
+- **`test_signal_noise.py`** - Pure testing functions
 
-#### Glioma Data
-```bash
-cd scripts/glioma
-python3 preprocess_glioma.py \
-    --dataset "glioma" \
-    --config_file "../../dataset_identities.yaml"
-```
+## 📈 Benefits
 
-### Utility Scripts
+1. **Better Organization** - Clear separation of concerns
+2. **Easier Maintenance** - Related functions grouped together
+3. **Improved Discoverability** - Easy to find relevant scripts
+4. **Reduced Duplication** - Common functions in core modules
+5. **Cleaner Interface** - Simple commands for common tasks
 
-#### Check Library Sizes
-```bash
-cd scripts/pbmc
-python3 check_library_sizes.py --csv_path "../../data/pbmc/filtered_counts.csv"
-```
+## 🚨 Migration Notes
 
-#### Inspect Glioma Data
-```bash
-cd scripts/glioma
-python3 inspect_glioma.py
-```
+### Breaking Changes
+- Old shell scripts moved to `legacy/simulation/`
+- Some import paths may need updating
+- Dataset scripts moved to `datasets/[dataset_type]/`
 
-### Direct Pipeline Execution
+### Backward Compatibility
+- Original functionality preserved
+- Old scripts still available in legacy directory
+- New unified interface provides same capabilities
 
-#### PBMC Pipeline
-```bash
-cd scripts/pbmc
-python3 run_pbmc_pipeline.py \
-    --input_csv "../../data/pbmc/filtered_counts.csv" \
-    --heldout_counts "1000,1500" \
-    --topic_configs "7,8,9" \
-    --base_output_dir "../../estimates/pbmc"
-```
+## 📝 Contributing
 
-#### Glioma Pipeline
-```bash
-cd scripts/glioma
-python3 run_glioma_pipeline.py \
-    --train_csv "../../data/glioma/glioma_counts_train.csv" \
-    --test_csv "../../data/glioma/glioma_counts_test.csv" \
-    --topic_configs "13,14,15,16" \
-    --base_output_dir "../../estimates/glioma"
-```
+When adding new scripts:
+1. **Core functions** → `core/`
+2. **Dataset-specific** → `datasets/[dataset_type]/`
+3. **Analysis scripts** → `analysis/`
+4. **Experiments** → `experiments/`
+5. **Model fitting** → `shared/` (if has dependencies)
 
-## Output Structure
-
-### PBMC Pipeline Output
-```
-estimates/pbmc/
-├── heldout_1000/
-│   ├── filtered_counts_train.csv
-│   ├── filtered_counts_test.csv
-│   ├── 7_topic_fit/
-│   │   ├── HLDA/
-│   │   ├── LDA/
-│   │   ├── NMF/
-│   │   └── plots/
-│   ├── 8_topic_fit/
-│   └── 9_topic_fit/
-└── heldout_1500/
-    └── ...
-```
-
-### Glioma Pipeline Output
-```
-estimates/glioma/
-├── 13_topic_fit/
-│   ├── HLDA/
-│   ├── LDA/
-│   ├── NMF/
-│   └── plots/
-├── 14_topic_fit/
-├── 15_topic_fit/
-├── 16_topic_fit/
-└── model_comparison/
-    ├── train_loglikelihood_matrix.csv
-    ├── test_loglikelihood_matrix.csv
-    ├── loglikelihood_comparison.png
-    ├── overfitting_analysis.csv
-    └── comprehensive_sse_heatmap.png
-```
-
-## Configuration
-
-Both pipelines use a YAML configuration file (`dataset_identities.yaml`) to define cell type identities for each dataset:
-
-```yaml
-pbmc:
-  identities:
-    - "T cells"
-    - "CD19+ B"
-    - "CD56+ NK"
-    - "CD34+"
-    - "Dendritic"
-    - "CD14+ Monocyte"
-
-glioma:
-  identities:
-    - "Oligodendrocyte"
-    - "Astrocyte"
-    - "Microglia"
-    - "Endothelial"
-    - "Neuron"
-    - "OPC"
-    - "T cell"
-    - "B cell"
-    - "Macrophage"
-    - "NK cell"
-    - "Neutrophil"
-    - "Cancer"
-```
-
-## Key Improvements
-
-1. **Organized by Dataset**: Clear separation between PBMC and glioma workflows
-2. **Shared Core Code**: Reusable modeling scripts in `shared/` directory
-3. **Single Entry Point**: One script to run any pipeline
-4. **Eliminated Redundancy**: Removed duplicate pipeline scripts
-5. **Better Documentation**: Clear usage examples and structure
-
-## Troubleshooting
-
-- **"scripts/ directory not found"**: Make sure you're running from the root directory
-- **Import errors**: The shared scripts use relative imports that should work automatically
-- **File not found errors**: Check that your data files exist in the expected locations
-- **Permission errors**: Make sure `run_pipelines.sh` is executable: `chmod +x scripts/run_pipelines.sh` 
+Follow the existing naming conventions and add appropriate documentation. 

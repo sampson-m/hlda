@@ -6,15 +6,17 @@ from numba import njit
 from numba.typed import List as TypedList
 import time
 import yaml
+from sklearn.decomposition import LatentDirichletAllocation
+from sklearn.preprocessing import normalize
 
 # --- HLDA/Gibbs functions and constants moved from gibbs.py ---
-def initialize_long_data(count_matrix: pd.DataFrame,
+def initialize_long_data_old(count_matrix: pd.DataFrame,
                          cell_identities: list[str],
                          topic_hierarchy_int: dict[int, list[int]],
                          identity_str2int: dict[str, int],
                          n_activity: int,
                          save_path: str | None = None):
-    """Initialize long data format for Gibbs sampling."""
+    """OLD: Initialize long data format for Gibbs sampling with random assignment."""
     # For PBMC data, cell identities are already the cell type labels
     cell_ints = np.array([identity_str2int[c] for c in cell_identities], dtype=np.int32)
     mat = count_matrix.to_numpy().astype(np.int32)
@@ -40,6 +42,185 @@ def initialize_long_data(count_matrix: pd.DataFrame,
         'cell_identity': ident_rep,
         'z': z0
     }
+    return long_data, n_cells, n_genes
+
+def estimate_identity_betas(count_matrix: pd.DataFrame, 
+                           cell_identities: list[str], 
+                           identity_topics: list[str]):
+    """Estimate identity topic betas from average gene expression per cell type."""
+    identity_betas = {}
+    
+    print("[INIT] Estimating identity topic betas from data...")
+    
+    for cell_type in identity_topics:
+        # Find cells of this type
+        type_mask = np.array([cell_type in cell_id for cell_id in cell_identities])
+        n_cells_type = type_mask.sum()
+        
+        if n_cells_type > 0:
+            # Average gene expression for this cell type
+            type_data = count_matrix.loc[type_mask]
+            avg_expr = type_data.mean(axis=0).values
+            
+            # Add small pseudocount and normalize to probability distribution
+            avg_expr = avg_expr + 1e-10
+            identity_betas[cell_type] = avg_expr / avg_expr.sum()
+            
+            print(f"[INIT]   {cell_type}: {n_cells_type} cells, avg total counts = {avg_expr.sum():.1f}")
+        else:
+            # Fallback to uniform if no cells of this type
+            n_genes = count_matrix.shape[1]
+            identity_betas[cell_type] = np.ones(n_genes) / n_genes
+            print(f"[INIT]   {cell_type}: 0 cells, using uniform beta")
+    
+    return identity_betas
+
+
+
+def compute_cell_identity_thetas(count_matrix: pd.DataFrame,
+                                cell_identities: list[str],
+                                identity_topics: list[str],
+                                identity_betas: dict):
+    """Compute identity theta for each cell based on how well it matches its own identity topic."""
+    print("[INIT] Computing cell-specific identity thetas...")
+    
+    cell_identity_thetas = []
+    own_similarities = []
+    
+    for i, cell_id in enumerate(cell_identities):
+        cell_data = count_matrix.iloc[i].values.astype(float)
+        cell_total = cell_data.sum()
+        
+        if cell_total == 0:
+            cell_identity_thetas.append(0.5)  # default for empty cells
+            own_similarities.append(0.0)
+            continue
+            
+        # Normalize to probability distribution
+        cell_data_norm = cell_data / cell_total
+        
+        # Find which identity this cell belongs to
+        cell_type = None
+        for identity in identity_topics:
+            if identity in cell_id:
+                cell_type = identity
+                break
+        
+        if cell_type and cell_type in identity_betas:
+            identity_beta = identity_betas[cell_type]
+            
+            # Compute correlation with its OWN identity topic only
+            corr = np.corrcoef(cell_data_norm, identity_beta)[0, 1]
+            # Handle NaN correlations (e.g., constant vectors)
+            own_sim = 0.0 if np.isnan(corr) else corr
+            
+            own_similarities.append(own_sim)
+            
+            # Convert correlation to identity theta using sigmoid transformation
+            # Higher correlation -> higher identity theta
+            # Clamp correlation to [0,1] first
+            corr_clamped = np.clip(own_sim, 0.0, 1.0)
+            # Sigmoid transformation: smooth S-curve from 0.2 to 0.9
+            # Centers transition around correlation = 0.7
+            identity_theta = 0.2 + 0.7 / (1 + np.exp(-10 * (corr_clamped - 0.7)))
+        else:
+            identity_theta = 0.6  # default for unidentified cells
+            own_similarities.append(0.0)
+            
+        cell_identity_thetas.append(identity_theta)
+    
+    # Report statistics
+    own_similarities = np.array(own_similarities)
+    cell_identity_thetas = np.array(cell_identity_thetas)
+    
+    print(f"[INIT]   Correlation with own identity: mean={np.mean(own_similarities):.3f}, std={np.std(own_similarities):.3f}")
+    print(f"[INIT]   Correlation range: [{np.min(own_similarities):.3f}, {np.max(own_similarities):.3f}]")
+    print(f"[INIT]   Identity theta stats: mean={np.mean(cell_identity_thetas):.3f}, std={np.std(cell_identity_thetas):.3f}")
+    print(f"[INIT]   Identity theta range: [{np.min(cell_identity_thetas):.3f}, {np.max(cell_identity_thetas):.3f}]")
+    
+    return cell_identity_thetas.tolist()
+
+
+
+def initialize_long_data(count_matrix: pd.DataFrame,
+                        cell_identities: list[str],
+                        topic_hierarchy_int: dict[int, list[int]],
+                        identity_str2int: dict[str, int],
+                        identity_topics: list[str],
+                        n_activity: int,
+                        save_path: str | None = None):
+    """NEW: Initialize long data using improved data-driven approach with random activity topic assignment."""
+    print("[INIT] ========== Improved Data-Driven HLDA Initialization ===========")
+    
+    # Step 1: Estimate identity topic betas from data
+    identity_betas = estimate_identity_betas(count_matrix, cell_identities, identity_topics)
+    
+    # Step 2: Compute cell-specific identity thetas
+    cell_identity_thetas = compute_cell_identity_thetas(count_matrix, cell_identities,
+                                                       identity_topics, identity_betas)
+    
+    # Step 3: Convert to token-level assignments
+    print("[INIT] Converting to token-level topic assignments...")
+    
+    cell_ints = np.array([identity_str2int[c] for c in cell_identities], dtype=np.int32)
+    mat = count_matrix.to_numpy().astype(np.int32)
+    n_cells, n_genes = mat.shape
+    rows, cols = np.nonzero(mat)
+    counts = mat[rows, cols]
+    cell_rep = np.repeat(rows.astype(np.int32), counts.astype(np.int32))
+    gene_rep = np.repeat(cols.astype(np.int32), counts.astype(np.int32))
+    total_tokens = cell_rep.shape[0]
+    ident_rep = cell_ints[cell_rep]
+    
+    print(f"[INIT]   Total tokens: {total_tokens:,}")
+    print(f"[INIT]   Cells: {n_cells}, Genes: {n_genes}")
+    
+    z0 = np.empty(total_tokens, dtype=np.int32)
+    identity_assignments = 0
+    activity_assignments = 0
+    activity_topic_counts = {f"V{i+1}": 0 for i in range(n_activity)}
+    
+    for i in range(total_tokens):
+        cell_idx = cell_rep[i]
+        ident_val = ident_rep[i]
+        valid = topic_hierarchy_int[ident_val]
+        
+        # Use precomputed identity theta for this cell
+        identity_theta = cell_identity_thetas[cell_idx]
+        
+        if len(valid) > 1 and np.random.rand() > identity_theta:
+            # Assign to activity topic randomly (uniform distribution)
+            activity_topics = valid[1:]  # [V1, V2, ...]
+            z0[i] = np.random.choice(activity_topics)
+            
+            activity_assignments += 1
+            # Track which activity topic was assigned
+            topic_name = f"V{z0[i] - len(identity_topics) + 1}"
+            if topic_name in activity_topic_counts:
+                activity_topic_counts[topic_name] += 1
+        else:
+            # Assign to identity topic  
+            z0[i] = valid[0]
+            identity_assignments += 1
+    
+    identity_frac = identity_assignments / total_tokens
+    activity_frac = activity_assignments / total_tokens
+    
+    print(f"[INIT]   Final assignments: {identity_frac:.1%} identity, {activity_frac:.1%} activity")
+    if n_activity > 0:
+        print(f"[INIT]   Activity topic breakdown:")
+        for topic, count in activity_topic_counts.items():
+            topic_frac = count / total_tokens
+            print(f"[INIT]     {topic}: {topic_frac:.1%} ({count:,} tokens)")
+    print(f"[INIT] ========== Initialization Complete ===========")
+    
+    long_data = {
+        'cell_idx': cell_rep,
+        'gene_idx': gene_rep,
+        'cell_identity': ident_rep,
+        'z': z0
+    }
+    
     return long_data, n_cells, n_genes
 
 def compute_constants(long_data, K: int, n_cells: int, n_genes: int):
@@ -182,6 +363,7 @@ def main():
     parser.add_argument("--alpha_c", type=float, default=0.1, help="Dirichlet prior for theta (default: 0.1)")
     parser.add_argument("--dataset", type=str, required=True, help="Dataset name (must match a key in the config file)")
     parser.add_argument("--config_file", type=str, default="dataset_identities.yaml", help="Path to dataset identity config YAML file")
+    parser.add_argument("--use_lda_init", action="store_true", help="If set, use LDA to initialize HLDA sampler.")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -225,15 +407,56 @@ def main():
 
     print(f"Data: {df.shape[0]} cells, {df.shape[1]} genes")
 
-    # Initialize long data
-    long_data, n_cells, n_genes = initialize_long_data(
-        count_matrix=df,
-        cell_identities=cell_identities,
-        topic_hierarchy_int=topic_hierarchy_int,
-        identity_str2int=IDENTITY_STR2INT,
-        n_activity=n_activity,
-        save_path=None
-    )
+    lda_theta = None
+    lda_beta = None
+    if args.use_lda_init:
+        print("[INFO] Running LDA for HLDA initialization...")
+        X = df.values.astype(float)
+        lda = LatentDirichletAllocation(n_components=total_topics, random_state=0, max_iter=100)
+        lda_theta = lda.fit_transform(X)
+        lda_theta = lda_theta / lda_theta.sum(axis=1, keepdims=True)
+        lda_beta = normalize(lda.components_, norm="l1", axis=1).T
+        print("[INFO] LDA initialization complete. Using LDA theta to bias HLDA initialization.")
+    
+    if args.use_lda_init and lda_theta is not None:
+        # Use LDA theta to bias initial topic assignments
+        mat = df.to_numpy().astype(np.int32)
+        n_cells, n_genes = mat.shape
+        rows, cols = np.nonzero(mat)
+        counts = mat[rows, cols]
+        cell_rep = np.repeat(rows.astype(np.int32), counts.astype(np.int32))
+        gene_rep = np.repeat(cols.astype(np.int32), counts.astype(np.int32))
+        total_tokens = cell_rep.shape[0]
+        ident_rep = np.array([IDENTITY_STR2INT[cell_identities[c]] for c in cell_rep], dtype=np.int32)
+        z0 = np.empty(total_tokens, dtype=np.int32)
+        for i in range(total_tokens):
+            cell_idx = cell_rep[i]
+            valid = topic_hierarchy_int[ident_rep[i]]
+            # Use LDA theta for this cell to bias topic assignment
+            probs = np.array([lda_theta[cell_idx, t] for t in valid])
+            if probs.sum() == 0:
+                probs = np.ones(len(valid)) / len(valid)
+            else:
+                probs = probs / probs.sum()
+            z0[i] = valid[np.random.choice(len(valid), p=probs)]
+        long_data = {
+            'cell_idx': cell_rep,
+            'gene_idx': gene_rep,
+            'cell_identity': ident_rep,
+            'z': z0
+        }
+        n_cells = df.shape[0]
+        n_genes = df.shape[1]
+    else:
+        long_data, n_cells, n_genes = initialize_long_data(
+            count_matrix=df,
+            cell_identities=cell_identities,
+            topic_hierarchy_int=topic_hierarchy_int,
+            identity_str2int=IDENTITY_STR2INT,
+            identity_topics=identity_topics,
+            n_activity=n_activity,
+            save_path=None
+        )
 
     # Compute constants
     consts = compute_constants(long_data, total_topics, n_cells, n_genes)
@@ -274,6 +497,7 @@ def main():
     )
 
     # Run Gibbs sampler
+    print(f"HLDA Gibbs sampler parameters: n_loops={args.n_loops}, burn_in={args.burn_in}, thin={args.thin}")
     print(f"Running HLDA Gibbs sampler ({total_topics} topics)...")
     start_time = time.time()
     saved_count = gibbs_and_write_memmap(
